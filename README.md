@@ -1,6 +1,6 @@
 # 安全巡检系统一键部署脚本
 
-Linux 服务器自动化安全巡检部署工具：**Fail2ban（暴力破解防护）+ auditd（审计）+ Wazuh（HIDS，可选）+ 多渠道实时告警（钉钉 / 企业微信 / Telegram / 邮件）+ 每日安全日报**。
+Linux 服务器自动化安全巡检部署工具：**Fail2ban（暴力破解防护）+ auditd（审计）+ Wazuh（HIDS，可选）+ 多渠道实时告警（钉钉 / 企业微信 / Telegram / 邮件）+ 资源水位告警（CPU/内存/磁盘/负载，可选）+ 每日安全日报**。
 
 单脚本、交互式/自动双模式，支持 Debian / Ubuntu / RHEL / CentOS / Rocky / Alma / Fedora。
 
@@ -14,6 +14,7 @@ Linux 服务器自动化安全巡检部署工具：**Fail2ban（暴力破解防�
 | **auditd** | 登录/账户变更/关键文件（passwd、shadow、ssh 配置、cron、.ssh 等）/危险命令（反弹 shell、管道 curl\|bash、base64 解码等）审计，实时监控可疑事件 |
 | **Wazuh**（可选） | Agent 模式：上报到已有 manager；全套模式：本机部署 manager+indexer+dashboard（官方 all-in-one），告警自动转发到聊天渠道 |
 | **每日巡检日报** | 每天 08:00 推送：当日登录成功/失败、账户变更、当前封禁 IP、系统负载 |
+| **资源监控**（可选） | CPU/内存/磁盘/负载 超阈值实时告警（systemd 周期采集，两级阈值 warn/critical，冷却去重防刷屏）|
 | **多渠道告警** | 钉钉（支持加签）/ 企业微信 / Telegram / 邮件，可多选；统一告警脚本 `/usr/local/bin/security-alert.sh` |
 
 ## 环境要求
@@ -44,9 +45,9 @@ bash install_security_monitor.sh
 
 按提示依次选择：
 
-1. **组件**（可多选，回车默认 `1,2,5`）：
-   - `1` Fail2ban · `2` auditd · `3` Wazuh Agent · `4` Wazuh 全套 · `5` 每日日报
-   - 输入 `all` 安装 1,2,5（不含 Wazuh）
+1. **组件**（可多选，回车默认 `1,2,5,6`）：
+   - `1` Fail2ban · `2` auditd · `3` Wazuh Agent · `4` Wazuh 全套 · `5` 每日日报 · `6` 资源监控
+   - 输入 `all` 安装 1,2,5,6（不含 Wazuh）
 2. Wazuh 参数（选了 Wazuh 才问）：agent 需填 manager 地址；全套会**在线检测最新版本**（如 4.14.7），回车用最新，也可指定旧版
 3. **告警渠道**（可多选，直接回车=不配置即仅写本地日志不推送，`0` 同效）：1 钉钉 · 2 企业微信 · 3 Telegram · 4 邮件
 4. 各渠道的 Webhook/Token/邮箱等参数
@@ -95,6 +96,14 @@ bash install_security_monitor.sh --auto
 | `WAZUH_DASHBOARD_PORT` | 443 | Wazuh Web 端口（被占用自动改 8443） |
 | `WAZUH_MANAGER_ADDR` | 空 | agent 模式必填：manager 地址 |
 | `WAZUH_ALERT_LEVEL` | 10 | Wazuh 告警阈值（≥该级别推送） |
+| `INSTALL_RESOURCE_MONITOR` | no | yes 安装资源监控（CPU/内存/磁盘/负载 阈值告警）|
+| `RES_CPU_WARN` / `RES_CPU_CRIT` | 80 / 90 | CPU 告警 / 严重阈值（%）|
+| `RES_MEM_WARN` / `RES_MEM_CRIT` | 80 / 90 | 内存 告警 / 严重阈值（%）|
+| `RES_DISK_WARN` / `RES_DISK_CRIT` | 80 / 90 | 磁盘 告警 / 严重阈值（%）|
+| `RES_LOAD_WARN` / `RES_LOAD_CRIT` | 空 | 负载 1 分钟告警 / 严重阈值；空 = 自动取 CPU 核数 / 核数×2 |
+| `RES_INTERVAL` | 300 | 检查间隔（秒）|
+| `RES_COOLDOWN` | 1800 | 同一指标重复告警冷却（秒，防刷屏）|
+| `RES_DISK_IGNORE` | 空 | 忽略的挂载点（逗号分隔，如 `/snap,/mnt/backup`）|
 
 ## 告警渠道获取方法
 
@@ -130,6 +139,8 @@ bash install_security_monitor.sh --auto
 | `/etc/cron.d/security-monitor` | 每日 08:00 日报 cron |
 | `/etc/logrotate.d/security-alert` | 告警日志轮转（保留 30 天） |
 | `/var/ossec/integrations/custom-security` | Wazuh→聊天渠道告警转发（仅全套模式） |
+| `/usr/local/bin/resource-monitor.sh` | 资源监控脚本（CPU/内存/磁盘/负载 阈值告警，仅 `INSTALL_RESOURCE_MONITOR=yes`）|
+| `/etc/systemd/system/resource-monitor.service` | 资源监控 systemd 单元（`--loop` 周期采集）|
 | `/var/log/security-alert.log` | 告警发送历史 |
 
 ## 常用命令
@@ -143,6 +154,10 @@ ausearch -ts today -m USER_LOGIN --success yes   # 今日登录成功
 journalctl -u audit-alert-watcher    # 监控器日志
 tail -f /var/log/security-alert.log  # 告警历史
 systemctl restart wazuh-manager      # Wazuh 告警转发改动后重启
+systemctl status resource-monitor      # 资源监控运行状态
+resource-monitor.sh --check            # 干跑一次, 打印各指标状态(不发告警)
+resource-monitor.sh --test             # 强制发一条测试告警验证渠道
+journalctl -u resource-monitor -f      # 资源监控日志
 ```
 
 ### Wazuh 常用命令
@@ -395,6 +410,7 @@ bash install_security_monitor.sh --uninstall   # 或 --remove / -u
 | SSH 不是 22 端口 | 编辑 `/etc/fail2ban/jail.local` 中 `port` 后 `systemctl restart fail2ban` |
 | 想监控 nginx/apache/ftp | 在 `/etc/fail2ban/jail.local` 添加对应监狱（如 `[nginx-http-auth] enabled = true`） |
 | 443 端口被占用 | 自动改 8443；或 `WAZUH_DASHBOARD_PORT=xxxx bash install_security_monitor.sh` |
+| 资源告警收不到 | `resource-monitor.sh --check` 看是否真超阈值；`--test` 测渠道；检查 `RES_DISK_IGNORE` 是否把目标盘忽略了，或阈值设得太高 |
 
 ## 安全提示
 

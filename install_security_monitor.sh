@@ -71,6 +71,16 @@ F2B_IGNOREIP="${F2B_IGNOREIP:-127.0.0.1}"  # 白名单(空格分隔)
 
 # auditd
 AUDIT_EXECVE="${AUDIT_EXECVE:-yes}"        # 是否审计全部命令(日志量大)
+
+# 资源监控 (CPU/内存/磁盘/负载 超阈值告警)
+RES_INTERVAL="${RES_INTERVAL:-300}"        # 检查间隔(秒, 默认300=5分钟)
+RES_COOLDOWN="${RES_COOLDOWN:-1800}"       # 同一指标重复告警冷却(秒, 默认1800=30分钟)
+RES_CPU_WARN="${RES_CPU_WARN:-80}";  RES_CPU_CRIT="${RES_CPU_CRIT:-90}"
+RES_MEM_WARN="${RES_MEM_WARN:-80}";  RES_MEM_CRIT="${RES_MEM_CRIT:-90}"
+RES_DISK_WARN="${RES_DISK_WARN:-80}"; RES_DISK_CRIT="${RES_DISK_CRIT:-90}"
+RES_LOAD_WARN="${RES_LOAD_WARN:-}"        # 空=自动取 CPU 核数
+RES_LOAD_CRIT="${RES_LOAD_CRIT:-}"         # 空=自动取 CPU 核数*2
+RES_DISK_IGNORE="${RES_DISK_IGNORE:-}"    # 忽略挂载点(逗号分隔, 如 /snap,/mnt/backup)
 # ============================ 默认值配置区结束 ==============================
 
 # 安装开关 (交互模式选择后设置, 自动模式默认全关, 由环境变量开启)
@@ -78,6 +88,7 @@ INSTALL_FAIL2BAN="${INSTALL_FAIL2BAN:-no}"
 INSTALL_AUDITD="${INSTALL_AUDITD:-no}"
 INSTALL_WAZUH="${INSTALL_WAZUH:-none}"    # none / agent / full
 INSTALL_DAILY="${INSTALL_DAILY:-no}"
+INSTALL_RESOURCE_MONITOR="${INSTALL_RESOURCE_MONITOR:-no}"
 
 # ============================== 工具函数 ====================================
 C_GREEN="\033[1;32m"; C_YELLOW="\033[1;33m"; C_RED="\033[1;31m"; C_CYAN="\033[1;36m"; C_OFF="\033[0m"
@@ -159,17 +170,18 @@ interactive_config() {
   echo -e "${C_YELLOW}本次安装会部署到当前服务器, 请按要求逐项配置。${C_OFF}"
 
   # ---------- 1. 选择组件 ----------
-  choose "请选择要安装的组件 (可多选):" COMP_SEL "no" "1,2,5" "1,2,5 (Fail2ban + auditd + 每日日报)" \
+  choose "请选择要安装的组件 (可多选):" COMP_SEL "no" "1,2,5,6" "1,2,5,6 (Fail2ban + auditd + 每日日报 + 资源监控)" \
     "1|Fail2ban     - 暴力破解自动封禁 (推荐)" \
     "2|auditd       - 登录/账户/命令审计+实时告警 (推荐)" \
     "3|Wazuh Agent  - 上报到已有的 Wazuh manager" \
     "4|Wazuh 全套   - 本机整套部署 (需 >=4G 内存)" \
     "5|每日巡检日报  - 每天08:00推送安全摘要" \
-    "all|推荐全套(Fail2ban+auditd+每日日报, 不含 Wazuh)"
+    "6|资源监控     - CPU/内存/磁盘/负载 超阈值实时告警" \
+    "all|推荐全套(Fail2ban+auditd+每日日报+资源监控, 不含 Wazuh)"
   local n
-  INSTALL_FAIL2BAN=no; INSTALL_AUDITD=no; INSTALL_WAZUH=none; INSTALL_DAILY=no
+  INSTALL_FAIL2BAN=no; INSTALL_AUDITD=no; INSTALL_WAZUH=none; INSTALL_DAILY=no; INSTALL_RESOURCE_MONITOR=no
   case "$COMP_SEL" in
-    all) INSTALL_FAIL2BAN=yes; INSTALL_AUDITD=yes; INSTALL_DAILY=yes ;;
+    all) INSTALL_FAIL2BAN=yes; INSTALL_AUDITD=yes; INSTALL_DAILY=yes; INSTALL_RESOURCE_MONITOR=yes ;;
     *) IFS=',' read -ra comp_arr <<< "$COMP_SEL"
        for n in "${comp_arr[@]}"; do
          n="${n## }"; n="${n%% }"
@@ -179,11 +191,12 @@ interactive_config() {
            3) INSTALL_WAZUH="agent" ;;
            4) INSTALL_WAZUH="full" ;;
            5) INSTALL_DAILY=yes ;;
+           6) INSTALL_RESOURCE_MONITOR=yes ;;
            *) warn "忽略未知组件选项: $n" ;;
          esac
        done ;;
   esac
-  if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ]; then
+  if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ] && [ "$INSTALL_RESOURCE_MONITOR" = no ]; then
     die "未选择任何组件, 退出安装"
   fi
 
@@ -279,6 +292,19 @@ interactive_config() {
   if [ "$INSTALL_AUDITD" = yes ]; then
     prompt AUDIT_EXECVE "是否审计全部命令执行 (yes/no, 日志量大)" "$AUDIT_EXECVE"
   fi
+  if [ "$INSTALL_RESOURCE_MONITOR" = yes ]; then
+    echo ""
+    echo -e "${C_CYAN}--- 资源监控参数 (直接回车用默认, 负载阈值自动取 CPU 核数) ---${C_OFF}"
+    prompt RES_CPU_WARN  "CPU  告警阈值(%)"  "$RES_CPU_WARN"
+    prompt RES_CPU_CRIT  "CPU  严重阈值(%)"  "$RES_CPU_CRIT"
+    prompt RES_MEM_WARN  "内存 告警阈值(%)"  "$RES_MEM_WARN"
+    prompt RES_MEM_CRIT  "内存 严重阈值(%)"  "$RES_MEM_CRIT"
+    prompt RES_DISK_WARN "磁盘 告警阈值(%)"  "$RES_DISK_WARN"
+    prompt RES_DISK_CRIT "磁盘 严重阈值(%)"  "$RES_DISK_CRIT"
+    prompt RES_INTERVAL  "检查间隔(秒, 默认300=5分钟)" "$RES_INTERVAL"
+    prompt RES_COOLDOWN  "重复告警冷却(秒, 默认1800=30分钟)" "$RES_COOLDOWN"
+    prompt RES_DISK_IGNORE "忽略挂载点(逗号分隔, 留空)" "${RES_DISK_IGNORE:-}"
+  fi
 
   # ---------- 6. 确认 ----------
   echo ""
@@ -288,6 +314,7 @@ interactive_config() {
   [ "$INSTALL_AUDITD" = yes ] && comps="${comps:+$comps, }auditd"
   [ "$INSTALL_WAZUH" != none ] && comps="${comps:+$comps, }Wazuh($INSTALL_WAZUH)"
   [ "$INSTALL_DAILY" = yes ] && comps="${comps:+$comps, }每日巡检日报"
+  [ "$INSTALL_RESOURCE_MONITOR" = yes ] && comps="${comps:+$comps, }资源监控"
   echo "  组件      : ${comps:-无}"
   echo "  告警渠道  : ${ALERT_CHANNELS:-未配置(仅本地日志)}"
   echo "$ALERT_CHANNELS" | grep -q dingtalk && [ -n "$DINGTALK_WEBHOOK" ] && echo "  钉钉      : ${DINGTALK_WEBHOOK}"
@@ -336,12 +363,26 @@ setup_alert_scripts() {
   SMTP_USER="$SMTP_USER" \
   SMTP_PASS="$SMTP_PASS" \
   SMTP_FROM="$SMTP_FROM" \
+  RES_INTERVAL="$RES_INTERVAL" \
+  RES_COOLDOWN="$RES_COOLDOWN" \
+  RES_CPU_WARN="$RES_CPU_WARN" \
+  RES_CPU_CRIT="$RES_CPU_CRIT" \
+  RES_MEM_WARN="$RES_MEM_WARN" \
+  RES_MEM_CRIT="$RES_MEM_CRIT" \
+  RES_DISK_WARN="$RES_DISK_WARN" \
+  RES_DISK_CRIT="$RES_DISK_CRIT" \
+  RES_LOAD_WARN="$RES_LOAD_WARN" \
+  RES_LOAD_CRIT="$RES_LOAD_CRIT" \
+  RES_DISK_IGNORE="$RES_DISK_IGNORE" \
   python3 - <<'PYEOF'
 import os, shlex
 keys = ["ALERT_CHANNELS","DINGTALK_WEBHOOK","DINGTALK_SECRET","WECHAT_WEBHOOK",
         "TG_BOT_TOKEN","TG_CHAT_ID","EMAIL_TO","SMTP_SERVER","SMTP_USER",
-        "SMTP_PASS","SMTP_FROM"]
-lines = ["# 安全告警渠道配置 (由安装脚本生成, 可手动修改)",
+        "SMTP_PASS","SMTP_FROM",
+        "RES_INTERVAL","RES_COOLDOWN","RES_CPU_WARN","RES_CPU_CRIT",
+        "RES_MEM_WARN","RES_MEM_CRIT","RES_DISK_WARN","RES_DISK_CRIT",
+        "RES_LOAD_WARN","RES_LOAD_CRIT","RES_DISK_IGNORE"]
+lines = ["# 安全告警与资源监控配置 (由安装脚本生成, 可手动修改)",
          "# 值经 shlex.quote 转义, 含 $ ` \" ' 等特殊字符也安全"]
 for k in keys:
     lines.append("%s=%s" % (k, shlex.quote(os.environ.get(k, ""))))
@@ -889,6 +930,190 @@ setup_wazuh() {
     *)     die "INSTALL_WAZUH 只能是 none/agent/full, 当前: $INSTALL_WAZUH" ;;
   esac
 }
+# ============================ 资源监控 ====================================
+setup_resource_monitor() {
+  log "配置资源监控 (CPU/内存/磁盘/负载 超阈值告警, 间隔 ${RES_INTERVAL}s)"
+
+  cat > /usr/local/bin/resource-monitor.sh <<'RMEOF'
+#!/usr/bin/env bash
+# 资源监控 (CPU/内存/磁盘/负载 超阈值告警) - 由 install_security_monitor.sh 生成
+# 用法: resource-monitor.sh [--loop|--once|--check|--test]
+#   --loop  持续循环(systemd 默认)  --once  跑一轮(超阈值即告警)后退出
+#   --check 干跑(只打印不发告警)    --test  强制发一条测试告警
+set -u
+CONF=/etc/security-monitor.conf
+[ -f "$CONF" ] && . "$CONF"
+ALERT=/usr/local/bin/security-alert.sh
+INTERVAL="${RES_INTERVAL:-300}"
+COOLDOWN="${RES_COOLDOWN:-1800}"
+CPU_WARN="${RES_CPU_WARN:-80}";  CPU_CRIT="${RES_CPU_CRIT:-90}"
+MEM_WARN="${RES_MEM_WARN:-80}";  MEM_CRIT="${RES_MEM_CRIT:-90}"
+DISK_WARN="${RES_DISK_WARN:-80}"; DISK_CRIT="${RES_DISK_CRIT:-90}"
+CORES="$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)"
+LOAD_WARN="${RES_LOAD_WARN:-$CORES}"
+LOAD_CRIT="${RES_LOAD_CRIT:-$((CORES*2))}"
+DISK_IGNORE="${RES_DISK_IGNORE:-}"
+MODE="${1:---loop}"
+NOW=0
+declare -A LAST   # key -> 上次告警 epoch(冷却去重)
+
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
+
+# pct>=crit?critical ; pct>=warn?warning ; 否则空
+sev_for() { local p="$1" w="$2" c="$3"; [ "$p" -ge "$c" ] && { echo critical; return; }; [ "$p" -ge "$w" ] && { echo warning; return; }; echo; }
+
+# 浮点比较 a>=b ? (用 awk, 避免 bc 依赖)
+ge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0>=b+0)}'; }
+
+maybe_alert() {  # key sev 标题 正文
+  local key="$1" sev="$2" title="$3" body="$4" last level
+  if [ "$MODE" = "--check" ]; then
+    printf '  [%s] %s\n    %s\n' "$(echo "$sev" | tr a-z A-Z)" "$title" "$(printf '%s\n' "$body" | head -3)"
+    return
+  fi
+  last="${LAST[$key]:-0}"
+  if [ "$((NOW - last))" -lt "$COOLDOWN" ]; then
+    log "抑制告警(冷却 ${COOLDOWN}s 中, ${key}): $title"
+    return
+  fi
+  LAST[$key]=$NOW
+  level=warn; [ "$sev" = critical ] && level=high
+  "$ALERT" "$title" "$body" "$level" 2>/dev/null \
+    && log "已发送告警 [$sev]: $title" \
+    || log "告警发送失败: $title (检查 $ALERT / 渠道配置)"
+}
+
+# ---- 各指标采样 ----
+cpu_pct() {  # 返回整数百分比(采样1秒)
+  local a b t1 i1 t2 i2 dt di
+  a=$(awk '/^cpu /{idle=$5+$6; t=0; for(i=2;i<=NF;i++) t+=$i; print t,idle; exit}' /proc/stat 2>/dev/null)
+  sleep 1
+  b=$(awk '/^cpu /{idle=$5+$6; t=0; for(i=2;i<=NF;i++) t+=$i; print t,idle; exit}' /proc/stat 2>/dev/null)
+  read -r t1 i1 <<< "$a"; read -r t2 i2 <<< "$b"
+  [ -n "$t1" ] && [ -n "$t2" ] || { echo 0; return; }
+  dt=$((t2-t1)); di=$((i2-i1))
+  [ "$dt" -le 0 ] && { echo 0; return; }
+  echo $(( (dt-di)*100 / dt ))
+}
+
+mem_pct() {
+  free -m 2>/dev/null | awk '/^Mem:/{ if(NF>=7 && $7+0>0) print int(($2-$7)*100/$2); else print int($3*100/$2); exit }'
+}
+
+check_disk() {
+  local pct mnt sev skip igp
+  local igarr=()
+  [ -n "$DISK_IGNORE" ] && IFS=',' read -ra igarr <<< "$DISK_IGNORE"
+  while IFS=$'\t' read -r pct mnt; do
+    [ -n "$pct" ] && [ -n "$mnt" ] || continue
+    skip=0
+    for igp in "${igarr[@]}"; do case "$mnt" in "$igp"*) skip=1; break;; esac; done
+    [ "$skip" = 1 ] && continue
+    sev=$(sev_for "$pct" "$DISK_WARN" "$DISK_CRIT")
+    [ -n "$sev" ] || continue
+    maybe_alert "disk:$mnt:$sev" "$sev" "💾 磁盘告警 ($sev)" \
+"挂载点 $mnt 使用率 ${pct}% (阈值 告警 ${DISK_WARN}% / 严重 ${DISK_CRIT}%)
+
+服务器: $(hostname)
+$(df -h "$mnt" 2>/dev/null | tail -1)"
+  done < <(df -x tmpfs -x devtmpfs -x squashfs -x iso9660 -x overlay -x fuse -x fuse.gvfsd-fuse --output=pcent,target 2>/dev/null \
+           | awk 'NR>1{p=$1; sub(/%/,"",p); $1=""; sub(/^ +/,""); print p"\t"$0}')
+}
+
+check_cpu() {
+  local p sev
+  p=$(cpu_pct)
+  [ -n "$p" ] || { log "CPU 采样失败, 跳过"; return; }
+  sev=$(sev_for "$p" "$CPU_WARN" "$CPU_CRIT")
+  [ -n "$sev" ] || return
+  maybe_alert "cpu:$sev" "$sev" "🖥️ CPU 告警 ($sev)" \
+"CPU 使用率 ${p}% (阈值 告警 ${CPU_WARN}% / 严重 ${CPU_CRIT}%)
+
+服务器: $(hostname)
+负载: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)  核心: ${CORES}"
+}
+
+check_mem() {
+  local p sev
+  p=$(mem_pct)
+  [ -n "$p" ] || { log "内存采样失败, 跳过"; return; }
+  sev=$(sev_for "$p" "$MEM_WARN" "$MEM_CRIT")
+  [ -n "$sev" ] || return
+  maybe_alert "mem:$sev" "$sev" "🧠 内存告警 ($sev)" \
+"内存使用率 ${p}% (阈值 告警 ${MEM_WARN}% / 严重 ${MEM_CRIT}%)
+
+服务器: $(hostname)
+$(free -h 2>/dev/null | head -2)"
+}
+
+check_load() {
+  local load sev
+  load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
+  [ -n "$load" ] || return
+  sev=""
+  if ge "$load" "$LOAD_CRIT"; then sev=critical
+  elif ge "$load" "$LOAD_WARN"; then sev=warning; fi
+  [ -n "$sev" ] || return
+  maybe_alert "load:$sev" "$sev" "📊 负载告警 ($sev)" \
+"系统 1 分钟负载 ${load} (阈值 告警 ${LOAD_WARN} / 严重 ${LOAD_CRIT}, CPU 核数 ${CORES})
+
+服务器: $(hostname)
+$(uptime)"
+}
+
+run_once() {
+  NOW=$(date +%s)
+  check_disk
+  check_cpu
+  check_mem
+  check_load
+}
+
+case "$MODE" in
+  --check) run_once; log "干跑完成 (未发告警, 仅打印状态)" ;;
+  --test)
+    "$ALERT" "🧪 资源监控测试告警" \
+"这是 resource-monitor 的测试告警, 收到表示资源告警链路已打通。
+
+服务器: $(hostname)
+CPU 核心: ${CORES}
+$(df -h 2>/dev/null | head -5)
+$(free -h 2>/dev/null | head -2)
+负载: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)" "info" \
+      && log "测试告警已发送" || log "测试告警发送失败 (检查 $ALERT / 渠道配置)"
+    ;;
+  --once) run_once; log "单次检查完成" ;;
+  --loop|"")
+    log "资源监控启动 (间隔 ${INTERVAL}s, 冷却 ${COOLDOWN}s, 核心 ${CORES})"
+    log "阈值 CPU ${CPU_WARN}/${CPU_CRIT}  内存 ${MEM_WARN}/${MEM_CRIT}  磁盘 ${DISK_WARN}/${DISK_CRIT}  负载 ${LOAD_WARN}/${LOAD_CRIT}"
+    while true; do run_once; sleep "$INTERVAL"; done ;;
+  *) echo "用法: $0 [--loop|--once|--check|--test]" >&2; exit 1 ;;
+esac
+RMEOF
+  chmod 755 /usr/local/bin/resource-monitor.sh
+
+  cat > /etc/systemd/system/resource-monitor.service <<'SVCEOF'
+[Unit]
+Description=Security Monitor - Resource threshold alerting (CPU/Mem/Disk/Load)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/resource-monitor.sh --loop
+Restart=always
+RestartSec=15
+SyslogIdentifier=resource-monitor
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+  systemctl daemon-reload
+  systemctl enable --now resource-monitor >/dev/null 2>&1 \
+    || warn "resource-monitor 启用失败, 可手动: systemctl enable --now resource-monitor"
+  log "资源监控已启动 (systemd: resource-monitor, 干跑验证: resource-monitor.sh --check)"
+}
 # ============================ 每日巡检日报 ==================================
 setup_daily_report() {
   log "配置每日安全巡检日报 (每天 08:00 推送)"
@@ -954,6 +1179,7 @@ test_alerts() {
   [ "$INSTALL_AUDITD" = yes ] && comps="${comps:+$comps }auditd"
   [ "$INSTALL_WAZUH" != none ] && comps="${comps:+$comps }Wazuh($INSTALL_WAZUH)"
   [ "$INSTALL_DAILY" = yes ] && comps="${comps:+$comps }每日巡检日报"
+  [ "$INSTALL_RESOURCE_MONITOR" = yes ] && comps="${comps:+$comps }资源监控"
   local body="服务器: ${host} (${ip})
 
 已部署组件: ${comps:-无}
@@ -976,10 +1202,14 @@ summary() {
   echo "    查询命令审计记录    ausearch -k cmd_audit | aureport -i"
   echo "    查看告警历史        tail -f /var/log/security-alert.log"
   echo "    修改告警配置        vi /etc/security-monitor.conf"
+  echo "    资源监控状态        systemctl status resource-monitor"
+  echo "    资源监控干跑        resource-monitor.sh --check"
+  echo "    资源告警测试        resource-monitor.sh --test"
   echo ""
   echo "  文件清单:"
   echo "    告警分发脚本        /usr/local/bin/security-alert.sh"
   echo "    审计实时监控器      /usr/local/bin/audit-alert-watcher.sh"
+  echo "    资源监控脚本        /usr/local/bin/resource-monitor.sh"
   echo "    每日巡检脚本        /usr/local/bin/security-daily-summary.sh"
   if [ "$INSTALL_WAZUH" = "full" ]; then
     echo "    Wazuh 控制台        https://$(hostname -I 2>/dev/null | awk '{print $1}'):${DASHBOARD_PORT_USED:-443}"
@@ -992,16 +1222,17 @@ summary() {
   echo "  注意事项:"
   echo "    - 若 SSH 端口不是 22, 请编辑 /etc/fail2ban/jail.local 改 port 后重启 fail2ban"
   echo "    - 如需监控 nginx/apache/ftp 等, 在 jail.local 添加对应监狱即可"
-  echo "    - 卸载: 停用 audit-alert-watcher/fail2ban/wazuh-agent 服务并删除对应包"
+  echo "    - 卸载: 停用 audit-alert-watcher/fail2ban/wazuh-agent/resource-monitor 服务并删除对应包"
   echo "======================================================================"
 }
 # ================================ 卸载模式 ==================================
 detect_installed() {
-  HAVE_FAIL2BAN=no; HAVE_AUDITD=no; HAVE_WAZUH=none; HAVE_DAILY=no; HAVE_ALERT=no
+  HAVE_FAIL2BAN=no; HAVE_AUDITD=no; HAVE_WAZUH=none; HAVE_DAILY=no; HAVE_ALERT=no; HAVE_RESOURCE_MONITOR=no
   if [ -f /etc/fail2ban/jail.local ] || [ -f /etc/fail2ban/action.d/security-alert.conf ]; then HAVE_FAIL2BAN=yes; fi
   if [ -f /etc/audit/rules.d/security.rules ]; then HAVE_AUDITD=yes; fi
   if [ -f /etc/cron.d/security-monitor ]; then HAVE_DAILY=yes; fi
   if [ -f /usr/local/bin/security-alert.sh ]; then HAVE_ALERT=yes; fi
+  if [ -f /etc/systemd/system/resource-monitor.service ] || [ -f /usr/local/bin/resource-monitor.sh ]; then HAVE_RESOURCE_MONITOR=yes; fi
   if { command -v dpkg >/dev/null 2>&1 && dpkg -l wazuh-manager 2>/dev/null | grep -q '^ii'; } || { command -v rpm >/dev/null 2>&1 && rpm -q wazuh-manager >/dev/null 2>&1; }; then
     HAVE_WAZUH=full
   elif { command -v dpkg >/dev/null 2>&1 && dpkg -l wazuh-agent 2>/dev/null | grep -q '^ii'; } || { command -v rpm >/dev/null 2>&1 && rpm -q wazuh-agent >/dev/null 2>&1; }; then
@@ -1045,6 +1276,15 @@ cleanup_daily() {
   rm -f /etc/cron.d/security-monitor
   rm -f /usr/local/bin/security-daily-summary.sh
   log "日报已清理"
+}
+
+cleanup_resource_monitor() {
+  log "清理资源监控..."
+  systemctl disable --now resource-monitor 2>/dev/null || true
+  rm -f /etc/systemd/system/resource-monitor.service
+  systemctl daemon-reload 2>/dev/null || true
+  rm -f /usr/local/bin/resource-monitor.sh
+  log "资源监控已清理"
 }
 
 cleanup_wazuh() {
@@ -1092,28 +1332,30 @@ uninstall() {
   echo "    auditd 审计监控   : $([ "$HAVE_AUDITD" = yes ] && echo 已安装 || echo 未检测到)"
   echo "    Wazuh             : $([ "$HAVE_WAZUH" != none ] && echo "已安装 ($HAVE_WAZUH)" || echo 未检测到)"
   echo "    每日巡检日报      : $([ "$HAVE_DAILY" = yes ] && echo 已安装 || echo 未检测到)"
+  echo "    资源监控          : $([ "$HAVE_RESOURCE_MONITOR" = yes ] && echo 已安装 || echo 未检测到)"
   echo "    告警脚本与配置    : $([ "$HAVE_ALERT" = yes ] && echo 已安装 || echo 未检测到)"
   echo ""
 
-  choose "选择要卸载的组件 (可多选):" DEL_SEL "no" "all" "全部(1-5)" \
+  choose "选择要卸载的组件 (可多选):" DEL_SEL "no" "all" "全部(1-6)" \
     "1|Fail2ban 配置" \
     "2|auditd 审计与告警监控" \
     "3|Wazuh ($HAVE_WAZUH)" \
     "4|每日巡检日报" \
-    "5|告警脚本与配置"
+    "5|告警脚本与配置" \
+    "6|资源监控"
 
   prompt REMOVE_PKGS "是否同时卸载软件包 (y=卸载包, n=仅删配置, 默认 n)" "n"
   case "$(printf '%s' "$REMOVE_PKGS" | tr 'A-Z' 'a-z')" in y|yes) REMOVE_PKGS=y ;; *) REMOVE_PKGS=n ;; esac
 
   local n
-  DO_FAIL2BAN=no; DO_AUDITD=no; DO_WAZUH=no; DO_DAILY=no; DO_ALERT=no
+  DO_FAIL2BAN=no; DO_AUDITD=no; DO_WAZUH=no; DO_DAILY=no; DO_ALERT=no; DO_RESOURCE_MONITOR=no
   case "$DEL_SEL" in
-    all) DO_FAIL2BAN=yes; DO_AUDITD=yes; DO_WAZUH=yes; DO_DAILY=yes; DO_ALERT=yes ;;
+    all) DO_FAIL2BAN=yes; DO_AUDITD=yes; DO_WAZUH=yes; DO_DAILY=yes; DO_ALERT=yes; DO_RESOURCE_MONITOR=yes ;;
     *) IFS=',' read -ra d_arr <<< "$DEL_SEL"
        for n in "${d_arr[@]}"; do
          n="${n## }"; n="${n%% }"
          case "$n" in
-           1) DO_FAIL2BAN=yes ;; 2) DO_AUDITD=yes ;; 3) DO_WAZUH=yes ;; 4) DO_DAILY=yes ;; 5) DO_ALERT=yes ;;
+           1) DO_FAIL2BAN=yes ;; 2) DO_AUDITD=yes ;; 3) DO_WAZUH=yes ;; 4) DO_DAILY=yes ;; 5) DO_ALERT=yes ;; 6) DO_RESOURCE_MONITOR=yes ;;
            *) warn "忽略未知卸载选项: $n" ;;
          esac
        done ;;
@@ -1126,6 +1368,7 @@ uninstall() {
   [ "$DO_AUDITD" = yes ] && items="${items:+$items, }auditd监控"
   [ "$DO_WAZUH" = yes ] && items="${items:+$items, }Wazuh"
   [ "$DO_DAILY" = yes ] && items="${items:+$items, }每日日报"
+  [ "$DO_RESOURCE_MONITOR" = yes ] && items="${items:+$items, }资源监控"
   [ "$DO_ALERT" = yes ] && items="${items:+$items, }告警配置"
   echo "  将清理: ${items:-无}"
   echo "  是否卸载软件包: $REMOVE_PKGS"
@@ -1136,6 +1379,7 @@ uninstall() {
   [ "$DO_AUDITD" = yes ] && cleanup_auditd
   [ "$DO_WAZUH" = yes ] && cleanup_wazuh
   [ "$DO_DAILY" = yes ] && cleanup_daily
+  [ "$DO_RESOURCE_MONITOR" = yes ] && cleanup_resource_monitor
   [ "$DO_ALERT" = yes ] && cleanup_alert
   log "卸载完成!"
 }
@@ -1158,9 +1402,9 @@ main() {
     interactive_config
   else
     # 自动模式: 组件开关需显式指定 (环境变量), 否则跳过
-    log "自动模式: 组件开关 INSTALL_FAIL2BAN=$INSTALL_FAIL2BAN INSTALL_AUDITD=$INSTALL_AUDITD INSTALL_WAZUH=$INSTALL_WAZUH INSTALL_DAILY=$INSTALL_DAILY"
+    log "自动模式: 组件开关 INSTALL_FAIL2BAN=$INSTALL_FAIL2BAN INSTALL_AUDITD=$INSTALL_AUDITD INSTALL_WAZUH=$INSTALL_WAZUH INSTALL_DAILY=$INSTALL_DAILY INSTALL_RESOURCE_MONITOR=$INSTALL_RESOURCE_MONITOR"
     log "自动模式: 告警渠道 ALERT_CHANNELS=${ALERT_CHANNELS:-未配置}"
-    if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ]; then
+    if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ] && [ "$INSTALL_RESOURCE_MONITOR" = no ]; then
       die "--auto 模式未指定任何组件, 示例: INSTALL_FAIL2BAN=yes INSTALL_AUDITD=yes INSTALL_DAILY=yes bash $0 --auto"
     fi
   fi
@@ -1171,6 +1415,7 @@ main() {
   [ "$INSTALL_AUDITD" = yes ] && { setup_auditd; setup_audit_watcher; }
   [ "$INSTALL_WAZUH" != none ] && setup_wazuh
   [ "$INSTALL_DAILY" = yes ] && setup_daily_report
+  [ "$INSTALL_RESOURCE_MONITOR" = yes ] && setup_resource_monitor
   test_alerts
   summary
 }
