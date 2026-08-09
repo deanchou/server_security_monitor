@@ -109,9 +109,11 @@ prompt() {
   printf -v "$var" '%s' "$val"
 }
 
-# 多选: choose <标题> <结果变量> <允许0> "编号|描述" ...
+# 多选: choose <标题> <结果变量> <允许0> <回车默认值> <默认值显示文本> "编号|描述" ...
+#   <回车默认值>    : 用户直接回车时写入变量的值 (可为空)
+#   <默认值显示文本>: 提示行 "直接回车=XXX" 中的 XXX, 让用户明确回车后果
 choose() {
-  local title="$1" var="$2" allow0="$3"; shift 3
+  local title="$1" var="$2" allow0="$3" def="$4" defdisp="$5"; shift 5
   local opt ans
   echo ""
   echo -e "${C_CYAN}$title${C_OFF}"
@@ -119,9 +121,13 @@ choose() {
     echo "    ${opt%%|*} ) ${opt#*|}"
   done
   [ "$allow0" = "yes" ] && echo "    0 ) 不配置/跳过"
-  printf "  请输入编号(逗号分隔多选, 直接回车=默认): "
+  if [ -n "$defdisp" ]; then
+    printf "  请输入编号(逗号分隔多选, 直接回车=%s): " "$defdisp"
+  else
+    printf "  请输入编号(逗号分隔多选): "
+  fi
   if ! read -r ans; then echo ""; die "输入已中断 (EOF), 安装取消"; fi
-  printf -v "$var" '%s' "$ans"
+  printf -v "$var" '%s' "${ans:-$def}"
 }
 
 confirm() { # confirm <提示语>
@@ -153,14 +159,13 @@ interactive_config() {
   echo -e "${C_YELLOW}本次安装会部署到当前服务器, 请按要求逐项配置。${C_OFF}"
 
   # ---------- 1. 选择组件 ----------
-  choose "请选择要安装的组件 (可多选):" COMP_SEL "no" \
+  choose "请选择要安装的组件 (可多选):" COMP_SEL "no" "1,2,5" "1,2,5 (Fail2ban + auditd + 每日日报)" \
     "1|Fail2ban     - 暴力破解自动封禁 (推荐)" \
     "2|auditd       - 登录/账户/命令审计+实时告警 (推荐)" \
     "3|Wazuh Agent  - 上报到已有的 Wazuh manager" \
     "4|Wazuh 全套   - 本机整套部署 (需 >=4G 内存)" \
     "5|每日巡检日报  - 每天08:00推送安全摘要" \
     "all|推荐全套(Fail2ban+auditd+每日日报, 不含 Wazuh)"
-  COMP_SEL="${COMP_SEL:-1,2,5}"
   local n
   INSTALL_FAIL2BAN=no; INSTALL_AUDITD=no; INSTALL_WAZUH=none; INSTALL_DAILY=no
   case "$COMP_SEL" in
@@ -206,12 +211,11 @@ interactive_config() {
   fi
 
   # ---------- 3. 选择告警渠道 ----------
-  choose "请选择告警推送渠道 (可多选):" CH_SEL "yes" \
+  choose "请选择告警推送渠道 (可多选, 不配置则仅写本地日志不推送):" CH_SEL "yes" "" "不配置(仅本地日志)" \
     "1|钉钉机器人" \
     "2|企业微信机器人" \
     "3|Telegram Bot" \
     "4|邮件 (SMTP)"
-  CH_SEL="${CH_SEL:-}"
   local channels=""
   case "$CH_SEL" in
     0|"") channels="" ;;
@@ -1091,13 +1095,12 @@ uninstall() {
   echo "    告警脚本与配置    : $([ "$HAVE_ALERT" = yes ] && echo 已安装 || echo 未检测到)"
   echo ""
 
-  choose "选择要卸载的组件 (可多选, 直接回车=全部):" DEL_SEL "no" \
+  choose "选择要卸载的组件 (可多选):" DEL_SEL "no" "all" "全部(1-5)" \
     "1|Fail2ban 配置" \
     "2|auditd 审计与告警监控" \
     "3|Wazuh ($HAVE_WAZUH)" \
     "4|每日巡检日报" \
     "5|告警脚本与配置"
-  DEL_SEL="${DEL_SEL:-all}"
 
   prompt REMOVE_PKGS "是否同时卸载软件包 (y=卸载包, n=仅删配置, 默认 n)" "n"
   case "$(printf '%s' "$REMOVE_PKGS" | tr 'A-Z' 'a-z')" in y|yes) REMOVE_PKGS=y ;; *) REMOVE_PKGS=n ;; esac

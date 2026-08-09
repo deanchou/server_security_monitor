@@ -48,7 +48,7 @@ bash install_security_monitor.sh
    - `1` Fail2ban · `2` auditd · `3` Wazuh Agent · `4` Wazuh 全套 · `5` 每日日报
    - 输入 `all` 安装 1,2,5（不含 Wazuh）
 2. Wazuh 参数（选了 Wazuh 才问）：agent 需填 manager 地址；全套会**在线检测最新版本**（如 4.14.7），回车用最新，也可指定旧版
-3. **告警渠道**（可多选，`0` 跳过）：1 钉钉 · 2 企业微信 · 3 Telegram · 4 邮件
+3. **告警渠道**（可多选，直接回车=不配置即仅写本地日志不推送，`0` 同效）：1 钉钉 · 2 企业微信 · 3 Telegram · 4 邮件
 4. 各渠道的 Webhook/Token/邮箱等参数
 5. Fail2ban / auditd 阈值参数
 6. 确认清单 → 开始安装
@@ -229,7 +229,7 @@ df -h /var/ossec /var/lib/wazuh-indexer      # 检查磁盘（索引数据增长
 bash install_security_monitor.sh --uninstall   # 或 --remove / -u
 ```
 
-- 自动检测已装组件 → 多选要清理的项 → 选择是否连软件包一起卸载（默认**仅删配置**，保留软件包）→ 确认后执行
+- 自动检测已装组件 → 多选要清理的项（直接回车=全部）→ 选择是否连软件包一起卸载（默认**仅删配置**，保留软件包）→ 确认后执行
 - Wazuh 全套：优先调用官方 `wazuh-install.sh --uninstall` 彻底卸载；agent 仅删配置或连同包
 - 清理范围：服务、配置、cron、日志轮转、仓库源、GPG key、告警脚本
 
