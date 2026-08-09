@@ -107,7 +107,7 @@ bash install_security_monitor.sh --auto
 
 ## Wazuh 说明
 
-- **版本自动检测**：优先使用在线检测到的最新正式版（GitHub API，超时 15s），失败回退内置默认 4.10；下载目录自动取主次版本号（如 4.14.7 → `packages.wazuh.com/4.14/`）
+- **版本自动检测**：优先使用在线检测到的最新正式版（GitHub API，超时 15s），失败回退内置默认 4.14；下载目录自动取主次版本号（如 4.14.7 → `packages.wazuh.com/4.14/`）
 - **端口冲突**：443 被占用时自动改用 8443（部署后按提示访问 `https://IP:8443`）
 - **Debian 兼容**：wazuh-install.sh 硬性依赖 Ubuntu 特有的 `software-properties-common` 包，脚本自动创建 dummy 包跳过检查
 - **安装日志**：`/root/wazuh-install.log`，dashboard 管理员账号密码也在里面

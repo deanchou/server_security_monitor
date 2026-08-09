@@ -24,7 +24,7 @@
 #    卸载:    sudo bash install_security_monitor.sh --uninstall
 #             (交互式选择要清理的组件, 可仅删配置或连包一起卸载)
 #
-#  适用系统: CentOS/RHEL/Rocky/Alma 7-9, Ubuntu 18.04-24.04, Debian 10-12
+#  适用系统: CentOS/RHEL/Rocky/Alma 7-9, Ubuntu 18.04-24.04, Debian 10-13
 #  需以 root 运行
 # ============================================================================
 
@@ -57,7 +57,7 @@ SMTP_FROM="${SMTP_FROM:-}"
 
 # Wazuh
 WAZUH_VERSION="${WAZUH_VERSION:-}"             # 空=自动在线检测最新版; 也可指定如 4.9
-WAZUH_VERSION_DEFAULT="4.10"                     # 在线检测失败时的兜底版本
+WAZUH_VERSION_DEFAULT="4.14"                     # 在线检测失败时的兜底版本
 WAZUH_DASHBOARD_PORT="${WAZUH_DASHBOARD_PORT:-443}" # Web 控制台端口(若被占用自动改 8443)
 WAZUH_MANAGER_ADDR="${WAZUH_MANAGER_ADDR:-}" # agent 模式: manager 服务器 IP/域名
 WAZUH_AGENT_NAME="${WAZUH_AGENT_NAME:-$(hostname)}"
@@ -158,7 +158,8 @@ interactive_config() {
     "2|auditd       - 登录/账户/命令审计+实时告警 (推荐)" \
     "3|Wazuh Agent  - 上报到已有的 Wazuh manager" \
     "4|Wazuh 全套   - 本机整套部署 (需 >=4G 内存)" \
-    "5|每日巡检日报  - 每天08:00推送安全摘要"
+    "5|每日巡检日报  - 每天08:00推送安全摘要" \
+    "all|推荐全套(Fail2ban+auditd+每日日报, 不含 Wazuh)"
   COMP_SEL="${COMP_SEL:-1,2,5}"
   local n
   INSTALL_FAIL2BAN=no; INSTALL_AUDITD=no; INSTALL_WAZUH=none; INSTALL_DAILY=no
@@ -166,12 +167,14 @@ interactive_config() {
     all) INSTALL_FAIL2BAN=yes; INSTALL_AUDITD=yes; INSTALL_DAILY=yes ;;
     *) IFS=',' read -ra comp_arr <<< "$COMP_SEL"
        for n in "${comp_arr[@]}"; do
+         n="${n## }"; n="${n%% }"
          case "$n" in
            1) INSTALL_FAIL2BAN=yes ;;
            2) INSTALL_AUDITD=yes ;;
            3) INSTALL_WAZUH="agent" ;;
            4) INSTALL_WAZUH="full" ;;
            5) INSTALL_DAILY=yes ;;
+           *) warn "忽略未知组件选项: $n" ;;
          esac
        done ;;
   esac
@@ -185,7 +188,8 @@ interactive_config() {
     [ -n "$WAZUH_MANAGER_ADDR" ] || die "agent 模式必须提供 manager 地址"
   elif [ "$INSTALL_WAZUH" = "full" ]; then
     local mem latest
-    mem=$(free -m | awk '/^Mem:/{print $2}')
+    mem=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+    [ -n "$mem" ] || mem=8192
     if [ "$mem" -lt 4096 ]; then
       warn "当前内存 ${mem}MB, Wazuh 全套官方要求 >=4GB, 强行安装可能 OOM!"
       confirm "仍然继续安装?" || die "已取消 Wazuh 全套安装"
@@ -214,11 +218,13 @@ interactive_config() {
     all) channels="dingtalk,wechat,telegram,email" ;;
     *) IFS=',' read -ra ch_arr <<< "$CH_SEL"
        for n in "${ch_arr[@]}"; do
+         n="${n## }"; n="${n%% }"
          case "$n" in
            1) channels="${channels:+$channels,}dingtalk" ;;
            2) channels="${channels:+$channels,}wechat" ;;
            3) channels="${channels:+$channels,}telegram" ;;
            4) channels="${channels:+$channels,}email" ;;
+           *) warn "忽略未知渠道选项: $n" ;;
          esac
        done ;;
   esac
@@ -293,7 +299,7 @@ interactive_config() {
 install_base() {
   log "安装基础依赖..."
   if [ "$PKG" = "apt" ]; then
-    eval "$UPDATE"
+    eval "$UPDATE" || warn "apt update 有源失败, 继续安装..."
     local pkgs="curl openssl python3 cron"
     [ "$INSTALL_FAIL2BAN" = yes ] && pkgs="$pkgs fail2ban"
     [ "$INSTALL_AUDITD" = yes ] && pkgs="$pkgs auditd"
@@ -308,26 +314,39 @@ install_base() {
     eval "$INST $pkgs"
   fi
   command -v python3 >/dev/null 2>&1 || die "缺少 python3, 无法完成安装"
+  command -v curl    >/dev/null 2>&1 || die "缺少 curl"
+  command -v openssl >/dev/null 2>&1 || die "缺少 openssl"
   log "依赖安装完成"
 }
 # ============================ 告警分发脚本 ==================================
 setup_alert_scripts() {
-  log "生成告警配置 /etc/security-monitor.conf"
-  cat > /etc/security-monitor.conf <<EOF
-# 安全告警渠道配置 (由安装脚本生成, 可手动修改)
-ALERT_CHANNELS="${ALERT_CHANNELS}"
-DINGTALK_WEBHOOK="${DINGTALK_WEBHOOK}"
-DINGTALK_SECRET="${DINGTALK_SECRET}"
-WECHAT_WEBHOOK="${WECHAT_WEBHOOK}"
-TG_BOT_TOKEN="${TG_BOT_TOKEN}"
-TG_CHAT_ID="${TG_CHAT_ID}"
-EMAIL_TO="${EMAIL_TO}"
-SMTP_SERVER="${SMTP_SERVER}"
-SMTP_USER="${SMTP_USER}"
-SMTP_PASS="${SMTP_PASS}"
-SMTP_FROM="${SMTP_FROM}"
-EOF
+  log "生成告警配置 /etc/security-monitor.conf (值经 shell 安全转义)"
+  ALERT_CHANNELS="$ALERT_CHANNELS" \
+  DINGTALK_WEBHOOK="$DINGTALK_WEBHOOK" \
+  DINGTALK_SECRET="$DINGTALK_SECRET" \
+  WECHAT_WEBHOOK="$WECHAT_WEBHOOK" \
+  TG_BOT_TOKEN="$TG_BOT_TOKEN" \
+  TG_CHAT_ID="$TG_CHAT_ID" \
+  EMAIL_TO="$EMAIL_TO" \
+  SMTP_SERVER="$SMTP_SERVER" \
+  SMTP_USER="$SMTP_USER" \
+  SMTP_PASS="$SMTP_PASS" \
+  SMTP_FROM="$SMTP_FROM" \
+  python3 - <<'PYEOF'
+import os, shlex
+keys = ["ALERT_CHANNELS","DINGTALK_WEBHOOK","DINGTALK_SECRET","WECHAT_WEBHOOK",
+        "TG_BOT_TOKEN","TG_CHAT_ID","EMAIL_TO","SMTP_SERVER","SMTP_USER",
+        "SMTP_PASS","SMTP_FROM"]
+lines = ["# 安全告警渠道配置 (由安装脚本生成, 可手动修改)",
+         "# 值经 shlex.quote 转义, 含 $ ` \" ' 等特殊字符也安全"]
+for k in keys:
+    lines.append("%s=%s" % (k, shlex.quote(os.environ.get(k, ""))))
+with open("/etc/security-monitor.conf", "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+PYEOF
   chmod 600 /etc/security-monitor.conf
+  # 预创建告警日志并设 600 权限, 避免 world-readable
+  [ -f /var/log/security-alert.log ] || install -m 600 -o root -g root /dev/null /var/log/security-alert.log 2>/dev/null || true
 
   log "生成告警分发脚本 /usr/local/bin/security-alert.sh"
   cat > /usr/local/bin/security-alert.sh <<'ALERTEOF'
@@ -344,6 +363,9 @@ LEVEL="${3:-high}"
 [ "$BODY" = "-" ] && BODY="$(cat)"
 
 echo "[$(date '+%F %T')] [$LEVEL] $TITLE :: $(echo "$BODY" | head -c 300)" >> /var/log/security-alert.log
+
+ok()   { echo -e "\033[1;32m[+]\033[0m $*"; }
+err()  { echo -e "\033[1;31m[-]\033[0m $*" >&2; }
 
 send_dingtalk() {
   [ -z "${DINGTALK_WEBHOOK:-}" ] && return 1
@@ -379,7 +401,9 @@ send_telegram() {
   [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ] && return 1
   curl -sS -m 10 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
     --data-urlencode "chat_id=${TG_CHAT_ID}" \
-    --data-urlencode "text=[${LEVEL}] ${TITLE}%0A%0A${BODY}" >/dev/null 2>&1 \
+    --data-urlencode "text=[${LEVEL}] ${TITLE}
+
+${BODY}" >/dev/null 2>&1 \
     || { err "[Telegram] 发送失败"; return 1; }
   ok "[Telegram] 已发送"
 }
@@ -391,9 +415,6 @@ send_email() {
     || { err "[邮件] 发送失败"; return 1; }
   ok "[邮件] 已发送"
 }
-
-ok()   { echo -e "\033[1;32m[+]\033[0m $*"; }
-err()  { echo -e "\033[1;31m[-]\033[0m $*" >&2; }
 
 for c in $(echo "${ALERT_CHANNELS:-}" | tr ',' ' '); do
   case "$c" in
@@ -408,9 +429,19 @@ ALERTEOF
   chmod 755 /usr/local/bin/security-alert.sh
 
   if echo "$ALERT_CHANNELS" | grep -q email && [ -n "$SMTP_SERVER" ]; then
-    printf 'set smtp=%s\nset smtp-auth=login\nset smtp-auth-user=%s\nset smtp-auth-password=%s\nset from=%s\nset ssl-verify=ignore\n' \
-      "$SMTP_SERVER" "$SMTP_USER" "$SMTP_PASS" "$SMTP_FROM" >> /etc/mail.rc 2>/dev/null || true
-    log "已写入 /etc/mail.rc SMTP 配置"
+    # 用标记块裹, 重装时先删旧块再追加, 避免重复
+    [ -f /etc/mail.rc ] && sed -i '/# BEGIN security-monitor/,/# END security-monitor/d' /etc/mail.rc 2>/dev/null || true
+    cat >> /etc/mail.rc <<MAILYEOF
+# BEGIN security-monitor
+set smtp=$SMTP_SERVER
+set smtp-auth=login
+set smtp-auth-user=$SMTP_USER
+set smtp-auth-password=$SMTP_PASS
+set from=$SMTP_FROM
+set ssl-verify=ignore
+# END security-monitor
+MAILYEOF
+    log "已写入 /etc/mail.rc SMTP 配置 (标记块: # BEGIN/END security-monitor)"
   fi
 }
 # ============================== Fail2ban ====================================
@@ -452,6 +483,7 @@ EOF
 # =============================== auditd =====================================
 set_auparam() {
   local key="$1" val="$2" f=/etc/audit/auditd.conf
+  [ -f "$f" ] || { warn "$f 不存在, 跳过设置 $key"; return 0; }
   if grep -q "^${key} *=" "$f"; then
     sed -i "s|^${key} *=.*|${key} = ${val}|" "$f"
   else
@@ -461,6 +493,7 @@ set_auparam() {
 
 setup_auditd() {
   log "配置 auditd (登录/账户/命令审计)"
+  mkdir -p /etc/audit/rules.d
 
   cat > /etc/audit/rules.d/security.rules <<'RULEEOF'
 ## ---- 关键文件/目录变更监控 (写入或属性修改即记录) ----
@@ -490,6 +523,7 @@ RULEEOF
   if [ "$AUDIT_EXECVE" = "yes" ]; then
     cat >> /etc/audit/rules.d/security.rules <<'RULEEOF'
 -a always,exit -F arch=b64 -S execve -F auid>=1000 -F auid!=4294967295 -k cmd_audit
+-a always,exit -F arch=b32 -S execve -F auid>=1000 -F auid!=4294967295 -k cmd_audit
 RULEEOF
   fi
 
@@ -523,11 +557,12 @@ CONF=/etc/security-monitor.conf
 LOG=/var/log/audit/audit.log
 [ -f "$LOG" ] || { echo "[-] $LOG 不存在, auditd 可能未运行" >&2; exit 1; }
 
-AUTHFAIL=/tmp/.security_authfail
+declare -A AUTHFAIL_CNT
 alert() { /usr/local/bin/security-alert.sh "$1" "$2" "${3:-high}"; }
 getf()  { echo "$1" | tr -d "\"'" | sed -n "s/.*$2=\([^ ]*\).*/\1/p" | head -1; }
 
-DANGEROUS_PATTERNS='bash -i|sh -i|/dev/tcp/|/dev/udp/|nc -[a-zA-Z0-9]*e |ncat -[a-zA-Z0-9]*e |netcat|socat|mkfifo|curl[^|]*[|] *(ba)?sh|wget[^|]*[|] *(ba)?sh|base64 -d|echo.*>>.*/etc/passwd|echo.*>>.*/etc/sudoers|useradd -o|usermod -o|dpkg -i|rpm -ivh'
+# 仅匹配高置信度的反弹 shell / 管道执行远程脚本, 减少误报
+DANGEROUS_PATTERNS='/dev/tcp/|/dev/udp/|bash -i|sh -i|bash -c .*(ba)?sh|sh -c .*(ba)?sh|nc -[a-zA-Z0-9]*e |ncat -[a-zA-Z0-9]*e |socat -[a-zA-Z ]|curl[^|]*[|] *(ba)?sh|wget[^|]*[|] *(ba)?sh|echo.*>>.*/etc/passwd|echo.*>>.*/etc/sudoers'
 
 echo "[*] 审计告警监控器已启动: $(date '+%F %T')"
 tail -n0 -F "$LOG" | while IFS= read -r line; do
@@ -536,14 +571,14 @@ tail -n0 -F "$LOG" | while IFS= read -r line; do
       acct=$(getf "$line" acct); addr=$(getf "$line" addr); exe=$(getf "$line" exe); res=$(getf "$line" res)
       if [ "$res" = "success" ]; then
         alert "🖥 新登录" "用户 **${acct}** 通过 ${exe} 从 ${addr} 登录 ($(date '+%F %T'))" "warn"
-        rm -f "$AUTHFAIL"
       fi
       ;;
     type=USER_AUTH*)
       res=$(getf "$line" res)
       if [ "$res" = "failed" ]; then
-        n=$(( $(cat "$AUTHFAIL" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$AUTHFAIL"
-        case "$n" in 5|10|20|40|80) alert "🚨 疑似暴力破解" "登录失败已达 ${n} 次, 攻击IP: $(getf "$line" addr)" "high";; esac
+        addr=$(getf "$line" addr); [ -n "$addr" ] || addr="unknown"
+        n=$(( ${AUTHFAIL_CNT[$addr]:-0} + 1 )); AUTHFAIL_CNT[$addr]=$n
+        case "$n" in 5|10|20|40|80) alert "🚨 疑似暴力破解" "来自 ${addr} 的登录失败已达 ${n} 次" "high";; esac
       fi
       ;;
     type=USER_ADD*|type=USER_DEL*|type=USER_CHAUTHTOK*)
@@ -564,7 +599,7 @@ WATCHEOF
 [Unit]
 Description=Audit Log Security Alert Watcher
 After=auditd.service
-Wants=auditd.service
+Requires=auditd.service
 
 [Service]
 Type=simple
@@ -614,12 +649,16 @@ install_wazuh_agent() {
   [ -n "$WAZUH_MANAGER_ADDR" ] || die "WAZUH_MODE=agent 但未设置 WAZUH_MANAGER_ADDR"
   log "安装 Wazuh Agent (manager: ${WAZUH_MANAGER_ADDR})"
   if [ "$PKG" = "apt" ]; then
-    curl -fsSL https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring \
-      --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import >/dev/null 2>&1 && \
-      chmod 644 /usr/share/keyrings/wazuh.gpg
+    if command -v gpg >/dev/null 2>&1; then
+      curl -fsSL https://packages.wazuh.com/key/GPG-KEY-WAZUH | gpg --no-default-keyring \
+        --keyring gnupg-ring:/usr/share/keyrings/wazuh.gpg --import >/dev/null 2>&1 && \
+        chmod 644 /usr/share/keyrings/wazuh.gpg || warn "Wazuh GPG key 导入失败, apt 安装可能报 key 缺失"
+    else
+      warn "未安装 gpg, 跳过 Wazuh GPG key 导入 (apt 安装可能失败)"
+    fi
     echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" \
       > /etc/apt/sources.list.d/wazuh.list
-    eval "$UPDATE"
+    eval "$UPDATE" || warn "apt update 有源失败, 继续..."
     WAZUH_MANAGER="$WAZUH_MANAGER_ADDR" WAZUH_AGENT_NAME="$WAZUH_AGENT_NAME" \
       DEBIAN_FRONTEND=noninteractive apt-get install -y wazuh-agent
   else
@@ -634,7 +673,19 @@ protect=1
 REPOEOF
     WAZUH_MANAGER="$WAZUH_MANAGER_ADDR" WAZUH_AGENT_NAME="$WAZUH_AGENT_NAME" yum install -y wazuh-agent
   fi
-  sed -i "s|<address>.*</address>|<address>${WAZUH_MANAGER_ADDR}</address>|" /var/ossec/etc/ossec.conf
+  # 仅替换文件中第一个 <address> 标签 (通常是 manager 地址), 避免覆盖 active-response 等其他地址
+  python3 - "$WAZUH_MANAGER_ADDR" <<'PYEOF' || true
+import re, sys
+addr = sys.argv[1]
+p = "/var/ossec/etc/ossec.conf"
+try:
+    s = open(p, encoding="utf-8").read()
+except Exception:
+    sys.exit(0)
+s2, n = re.subn(r"(<address>)[^<]*(</address>)", lambda m: m.group(1)+addr+m.group(2), s, count=1)
+if n:
+    open(p, "w", encoding="utf-8").write(s2)
+PYEOF
   systemctl enable wazuh-agent >/dev/null 2>&1 || true
   systemctl restart wazuh-agent 2>/dev/null || warn "wazuh-agent 启动失败"
   sleep 2
@@ -647,8 +698,9 @@ extract_wazuh_credentials() {
   local logf=/root/wazuh-install.log
   WAZUH_DASH_USER="admin"; WAZUH_DASH_PASS=""; WAZUH_API_USER="wazuh-wui"; WAZUH_API_PASS=""
   [ -f "$logf" ] || { warn "未找到 $logf, 无法自动提取账号密码"; return 1; }
-  # dashboard admin: Summary 块中不带时间戳前缀的 "Password:" 行
-  WAZUH_DASH_PASS=$(grep -E '^\s*Password: ' "$logf" | head -1 | sed 's/^\s*[Pp]assword: *//' | tr -d '\r') || true
+  # dashboard admin: 定位 "User: admin" 后紧随的 Password 行, 避免取错其他用户密码
+  WAZUH_DASH_PASS=$(grep -A1 -iE '^[[:space:]]*User:[[:space:]]*admin[[:space:]]*$' "$logf" 2>/dev/null \
+    | grep -iE '^[[:space:]]*Password:' | head -1 | sed 's/^[[:space:]]*[Pp]assword:[[:space:]]*//' | tr -d '\r') || true
   # API 凭据: 优先从日志取 (--change-passwords 场景打印), 否则从 dashboard 配置 wazuh.yml 取明文
   WAZUH_API_PASS=$(grep -iE 'password for Wazuh API user wazuh-wui' "$logf" | head -1 | sed 's/.*\bis //' | tr -d '\r') || true
   if [ -z "$WAZUH_API_PASS" ] && [ -f /usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml ]; then
@@ -665,7 +717,8 @@ extract_wazuh_credentials() {
 setup_wazuh_full() {
   local mem
   resolve_wazuh_version
-  mem=$(free -m | awk '/^Mem:/{print $2}')
+  mem=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}')
+  [ -n "$mem" ] || mem=8192
   if [ "$mem" -lt 4096 ]; then
     warn "当前内存 ${mem}MB, Wazuh 全套官方要求 >=4GB, 将继续尝试(使用 -i 忽略检测)"
   fi
@@ -716,10 +769,13 @@ DEBCTL
     || die "Wazuh 安装失败, 请查看 /root/wazuh-install.log (结尾有错误原因; 重跑可加 --overwrite)"
 
   if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --permanent --add-port=1514/tcp --add-port=1515/tcp --add-port=55000/tcp --add-port=443/tcp >/dev/null 2>&1 || true
+    firewall-cmd --permanent --add-port=1514/tcp --add-port=1515/tcp --add-port=55000/tcp --add-port=${dash_port}/tcp >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   elif command -v ufw >/dev/null 2>&1; then
-    ufw allow 1514/tcp; ufw allow 1515/tcp; ufw allow 443/tcp >/dev/null 2>&1 || true
+    ufw allow 1514/tcp >/dev/null 2>&1 || true
+    ufw allow 1515/tcp >/dev/null 2>&1 || true
+    ufw allow 55000/tcp >/dev/null 2>&1 || true
+    ufw allow ${dash_port}/tcp >/dev/null 2>&1 || true
   fi
 
   log "配置 Wazuh 告警转发到聊天渠道"
@@ -730,17 +786,26 @@ import json, sys, hmac, hashlib, base64, time, urllib.parse, urllib.request, re
 
 conf = {}
 try:
+    import shlex
     for line in open("/etc/security-monitor.conf", encoding="utf-8"):
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
-        conf[k.strip()] = v.strip().strip('"').strip("'")
+        try:
+            parts = shlex.split(v.strip(), comments=True)
+            conf[k.strip()] = parts[0] if parts else ""
+        except Exception:
+            conf[k.strip()] = v.strip().strip('"').strip("'")
 except Exception:
     pass
 
 try:
-    data = json.load(sys.stdin)
+    # Wazuh 把告警 JSON 写入文件并通过 argv[1] 传入; 兼容 stdin
+    if len(sys.argv) > 1 and sys.argv[1] and sys.argv[1] != "-":
+        data = json.load(open(sys.argv[1], encoding="utf-8"))
+    else:
+        data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 
@@ -833,11 +898,10 @@ TMP=$(mktemp)
 {
   echo "## 📋 每日安全巡检报告 $(date '+%F %T')"
   echo ""
-  echo "### 1. 今日登录成功 (最近20条)"
-  ausearch -ts today -m USER_LOGIN --success yes 2>/dev/null | tr -d '"' \
-    | grep -oE 'acct=[^ ]*|addr=[^ ]*|exe=[^ ]*' | tail -60 || echo "无记录"
+  echo "### 1. 今日登录记录 (aureport, 最近25条)"
+  aureport -l -i -ts today 2>/dev/null | tail -25 || echo "无记录"
   echo ""
-  echo "### 2. 今日登录失败次数: $(ausearch -ts today -m USER_AUTH --success no 2>/dev/null | wc -l)"
+  echo "### 2. 今日登录失败次数: $(aureport -l -i --failed -ts today 2>/dev/null | grep -cE '^[0-9]+\.' )"
   echo ""
   echo "### 3. 今日账户变更"
   ausearch -ts today -m USER_ADD,USER_DEL,USER_CHAUTHTOK 2>/dev/null | tail -20 || echo "无记录"
@@ -886,13 +950,13 @@ test_alerts() {
   [ "$INSTALL_AUDITD" = yes ] && comps="${comps:+$comps }auditd"
   [ "$INSTALL_WAZUH" != none ] && comps="${comps:+$comps }Wazuh($INSTALL_WAZUH)"
   [ "$INSTALL_DAILY" = yes ] && comps="${comps:+$comps }每日巡检日报"
-  /usr/local/bin/security-alert.sh "✅ 安全巡检部署完成
-服务器: ${host} (${ip})
+  local body="服务器: ${host} (${ip})
 
 已部署组件: ${comps:-无}
 告警渠道: ${ALERT_CHANNELS}
 
-此消息表示告警链路已打通。" "info" \
+此消息表示告警链路已打通。"
+  /usr/local/bin/security-alert.sh "✅ 安全巡检部署完成" "$body" "info" \
     || warn "测试告警发送失败, 请检查 /etc/security-monitor.conf 配置"
 }
 
@@ -934,9 +998,9 @@ detect_installed() {
   if [ -f /etc/audit/rules.d/security.rules ]; then HAVE_AUDITD=yes; fi
   if [ -f /etc/cron.d/security-monitor ]; then HAVE_DAILY=yes; fi
   if [ -f /usr/local/bin/security-alert.sh ]; then HAVE_ALERT=yes; fi
-  if dpkg -l wazuh-manager 2>/dev/null | grep -q '^ii' || rpm -q wazuh-manager >/dev/null 2>&1; then
+  if { command -v dpkg >/dev/null 2>&1 && dpkg -l wazuh-manager 2>/dev/null | grep -q '^ii'; } || { command -v rpm >/dev/null 2>&1 && rpm -q wazuh-manager >/dev/null 2>&1; }; then
     HAVE_WAZUH=full
-  elif dpkg -l wazuh-agent 2>/dev/null | grep -q '^ii' || rpm -q wazuh-agent >/dev/null 2>&1; then
+  elif { command -v dpkg >/dev/null 2>&1 && dpkg -l wazuh-agent 2>/dev/null | grep -q '^ii'; } || { command -v rpm >/dev/null 2>&1 && rpm -q wazuh-agent >/dev/null 2>&1; }; then
     HAVE_WAZUH=agent
   fi
 }
@@ -958,7 +1022,12 @@ cleanup_auditd() {
   rm -f /etc/systemd/system/audit-alert-watcher.service
   systemctl daemon-reload 2>/dev/null || true
   rm -f /etc/audit/rules.d/security.rules
-  augenrules --load >/dev/null 2>&1 || auditctl -D >/dev/null 2>&1 || true
+  if ! augenrules --load >/dev/null 2>&1; then
+    # augenrules 不可用时, 仅清除本脚本添加的 key, 不影响用户其他规则
+    for k in identity sudoers sshd cron dotfiles netconf systemd session cmd_audit; do
+      auditctl -D -k "$k" 2>/dev/null || true
+    done
+  fi
   systemctl restart auditd 2>/dev/null || service auditd restart >/dev/null 2>&1 || true
   if [ "$REMOVE_PKGS" = "y" ]; then
     log "卸载 auditd 软件包..."
@@ -978,7 +1047,7 @@ cleanup_wazuh() {
   if [ "$HAVE_WAZUH" = full ]; then
     log "卸载 Wazuh 全套 (将移除 wazuh-manager/indexer/dashboard/agent 全部组件)..."
     if [ -f /root/wazuh-install.sh ]; then
-      bash /root/wazuh-install.sh --uninstall || warn "官方卸载未完全成功, 可手动: apt/yum remove wazuh-manager wazuh-indexer wazuh-dashboard wazuh-agent"
+      bash /root/wazuh-install.sh --uninstall </dev/null || warn "官方卸载未完全成功, 可手动: apt/yum remove wazuh-manager wazuh-indexer wazuh-dashboard wazuh-agent"
     else
       warn "未找到 /root/wazuh-install.sh, 改为手动卸载组件..."
       if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get remove -y wazuh-manager wazuh-indexer wazuh-dashboard wazuh-agent || warn "部分组件卸载失败"; else yum remove -y wazuh-manager wazuh-indexer wazuh-dashboard wazuh-agent || warn "部分组件卸载失败"; fi
@@ -1031,6 +1100,7 @@ uninstall() {
   DEL_SEL="${DEL_SEL:-all}"
 
   prompt REMOVE_PKGS "是否同时卸载软件包 (y=卸载包, n=仅删配置, 默认 n)" "n"
+  case "$(printf '%s' "$REMOVE_PKGS" | tr 'A-Z' 'a-z')" in y|yes) REMOVE_PKGS=y ;; *) REMOVE_PKGS=n ;; esac
 
   local n
   DO_FAIL2BAN=no; DO_AUDITD=no; DO_WAZUH=no; DO_DAILY=no; DO_ALERT=no
@@ -1038,8 +1108,10 @@ uninstall() {
     all) DO_FAIL2BAN=yes; DO_AUDITD=yes; DO_WAZUH=yes; DO_DAILY=yes; DO_ALERT=yes ;;
     *) IFS=',' read -ra d_arr <<< "$DEL_SEL"
        for n in "${d_arr[@]}"; do
+         n="${n## }"; n="${n%% }"
          case "$n" in
            1) DO_FAIL2BAN=yes ;; 2) DO_AUDITD=yes ;; 3) DO_WAZUH=yes ;; 4) DO_DAILY=yes ;; 5) DO_ALERT=yes ;;
+           *) warn "忽略未知卸载选项: $n" ;;
          esac
        done ;;
   esac
@@ -1084,6 +1156,7 @@ main() {
   else
     # 自动模式: 组件开关需显式指定 (环境变量), 否则跳过
     log "自动模式: 组件开关 INSTALL_FAIL2BAN=$INSTALL_FAIL2BAN INSTALL_AUDITD=$INSTALL_AUDITD INSTALL_WAZUH=$INSTALL_WAZUH INSTALL_DAILY=$INSTALL_DAILY"
+    log "自动模式: 告警渠道 ALERT_CHANNELS=${ALERT_CHANNELS:-未配置}"
     if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ]; then
       die "--auto 模式未指定任何组件, 示例: INSTALL_FAIL2BAN=yes INSTALL_AUDITD=yes INSTALL_DAILY=yes bash $0 --auto"
     fi
