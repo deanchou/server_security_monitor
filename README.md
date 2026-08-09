@@ -223,6 +223,156 @@ df -h /var/ossec /var/lib/wazuh-indexer      # 检查磁盘（索引数据增长
 
 > 凭据说明：dashboard 的 `admin` 用户、API 的 `wazuh-wui` 用户、indexer 的 `admin` 用户密码均记录在 **/root/wazuh-install.log**。安装完成后脚本会自动提取并在摘要中显示；也可随时 `grep -A1 'User: admin' /root/wazuh-install.log` 查看。
 
+## Wazuh Dashboard 反向代理（Caddy / Nginx）
+
+脚本默认让 dashboard 直接监听 `443`（被占用则 `8443`），并对外放行该端口。生产环境建议把 dashboard 收回回环、用 Caddy 或 Nginx 在前面做 TLS 终结，只暴露反代端口。三个关键点：① dashboard 自带 HTTPS + **自签证书**，上游需跳过证书校验或信任其 CA；② OpenSearch Security 插件需信任代理的 `X-Forwarded-*`，否则登录 cookie/重定向会失效；③ 443 可能与反代冲突，需让出。
+
+### 0. 确认现状
+
+```bash
+ss -tlnp | grep -E ':443 |:8443 '                      # 当前监听地址/端口
+grep -E 'server\.(host|port)' /etc/wazuh-dashboard/opensearch_dashboards.yml
+```
+
+### 1. 把 dashboard 收回 127.0.0.1 （可选）
+
+编辑 `/etc/wazuh-dashboard/opensearch_dashboards.yml`：
+
+```yaml
+server.host: "127.0.0.1"              # 只听回环, 外部无法直连
+server.port: 8443                     # 挑一个本机端口, 避开 443
+server.xforwarded.supportedProxies: ["127.0.0.1/32"]   # 信任本机反代的转发头
+```
+
+```bash
+systemctl restart wazuh-dashboard
+ss -tlnp | grep 8443                  # 应只见 127.0.0.1:8443
+```
+
+### 2a. Caddy（推荐，自动 HTTPS）
+
+```bash
+# Debian/Ubuntu 安装(官方源)
+apt install -y debian-keyring gnupg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy.list
+apt update && apt install caddy
+# RHEL 系: dnf install 'dnf-command(copr)' && dnf copr enable @caddy/caddy && dnf install caddy
+```
+
+`/etc/caddy/Caddyfile`：
+
+```caddyfile
+wazuh.example.com {
+    reverse_proxy https://127.0.0.1:8443 {
+        transport http {
+            tls
+            tls_insecure_skip_verify            # 上游自签证书, 本机直连可跳过
+            # 或更严谨: tls_trusted_ca_cert_file /etc/wazuh-dashboard/certs/root-ca.pem
+        }
+        header_up Host {host}                  # 透传域名, 让 cookie/重定向基于该域名
+    }
+}
+# 无域名/内网用自签内部 CA: 把首行换成 ":443 {" 并在块内加 "tls internal"
+```
+
+```bash
+caddy validate --config /etc/caddy/Caddyfile
+systemctl reload caddy
+```
+
+### 2b. Nginx
+
+```bash
+apt install -y nginx   # 或 dnf install nginx
+```
+
+在 `nginx.conf` 的 `http {}` 顶部加（WebSocket 升级映射，只需一处）：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
+
+`/etc/nginx/conf.d/wazuh.conf`：
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name wazuh.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/wazuh.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/wazuh.example.com/privkey.pem;
+    # 证书可用 certbot --nginx -d wazuh.example.com 自动申请
+
+    # 上游 dashboard 是 HTTPS + 自签证书
+    proxy_ssl_verify off;            # 或 proxy_ssl_trusted_certificate /etc/wazuh-dashboard/certs/root-ca.pem;
+    proxy_ssl_server_name on;
+
+    client_max_body_size 50m;         # 允许上传报告/CSV 导出
+    proxy_read_timeout  300s;        # 长查询/报告生成
+    proxy_send_timeout  300s;
+
+    # OpenSearch Dashboards 响应头较大, 默认 buffer 会 502 "upstream sent too big header"
+    proxy_buffer_size        128k;
+    proxy_buffers            4 256k;
+    proxy_busy_buffers_size 512k;
+
+    location / {
+        proxy_pass https://127.0.0.1:8443;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        # WebSocket（实时日志/报告）
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+
+server {                               # http → https 跳转
+    listen 80;
+    server_name wazuh.example.com;
+    return 301 https://$host$request_uri;
+}
+```
+
+```bash
+nginx -t && systemctl reload nginx
+```
+
+### 3. 防火墙
+
+```bash
+# 放行反代 443
+firewall-cmd --permanent --add-service=https && firewall-cmd --reload   # 或 ufw allow 443/tcp
+# 移除外部对 dashboard 直连端口的访问(脚本此前放行过)
+firewall-cmd --permanent --remove-port=8443/tcp 2>/dev/null && firewall-cmd --reload
+# ufw: ufw delete allow 8443/tcp
+```
+
+> dashboard 已绑 `127.0.0.1`，即使防火墙没删该端口，外部也连不上，删掉只是更干净。
+
+### 4. 验证与排错
+
+```bash
+curl -kI https://wazuh.example.com           # 应返回 200/302(登录页)
+journalctl -u caddy -f   # 或 journalctl -u nginx -f / journalctl -u wazuh-dashboard -f
+```
+
+| 现象 | 原因 / 解决 |
+|------|------|
+| 登录后立即跳回登录页 / 401 | dashboard 未配 `server.xforwarded.supportedProxies`，或反代未透传 `Host`（Caddy `header_up Host {host}` / Nginx `proxy_set_header Host $host`）|
+| 502 Bad Gateway | dashboard 未重启成 `127.0.0.1:8443`；或未对自签证书跳过校验（Caddy `tls_insecure_skip_verify` / Nginx `proxy_ssl_verify off`）|
+| Nginx 报 `upstream sent too big header` | 未调大 `proxy_buffer_size`/`proxy_buffers`（见上方配置）|
+| 仍能直连 `https://IP:8443` | `server.host` 没改回 `127.0.0.1`，或防火墙没删该端口 |
+| 想部署在子路径 `/wazuh` | dashboard 设 `server.basePath: "/wazuh"`，Caddy/Nginx 用 `reverse_proxy /wazuh/*` / `location /wazuh/`；根域名反代无需此项 |
+
+> 整个方案只动 dashboard 的配置文件、系统防火墙与反代配置，**不修改本安装脚本**；改完 `systemctl restart wazuh-dashboard` + reload 反代即生效。
+
 ## 卸载
 
 ```bash
@@ -249,7 +399,7 @@ bash install_security_monitor.sh --uninstall   # 或 --remove / -u
 ## 安全提示
 
 - 告警 Webhook 属于敏感凭据，`/etc/security-monitor.conf` 已设为 600 权限
-- **勿将 Wazuh dashboard（443/8443）暴露公网**，建议仅内网/跳板机访问；API 端口 55000 同理
+- **勿将 Wazuh dashboard（443/8443）直接暴露公网**，建议仅内网/跳板机访问，或经 Caddy/Nginx 反向代理发布（见上方「Wazuh Dashboard 反向代理」专节）；API 端口 55000 同理
 - Fail2ban 白名单默认仅本机回环地址，请将常用运维 IP 加入 `F2B_IGNOREIP`，避免误封
 - `AUDIT_EXECVE=yes` 会记录所有普通用户命令（审计日志增长较快），磁盘紧张可关闭
 - 保持系统与 Wazuh 及时更新（脚本支持指定 `WAZUH_VERSION` 回退/升级）
