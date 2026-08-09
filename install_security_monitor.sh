@@ -965,10 +965,17 @@ sev_for() { local p="$1" w="$2" c="$3"; [ "$p" -ge "$c" ] && { echo critical; re
 # 浮点比较 a>=b ? (用 awk, 避免 bc 依赖)
 ge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a+0>=b+0)}'; }
 
+# 干跑时打印每个指标当前值(不论是否超阈值); 非干跑模式静默
+print_status() {  # 指标 当前值 阈值文本 状态
+  [ "$MODE" = "--check" ] || return
+  local ind="$1" val="$2" thr="$3" st="${4:-正常}"
+  printf '  [%s] %s = %s (阈值 %s)\n' "$st" "$ind" "$val" "$thr"
+}
+
 maybe_alert() {  # key sev 标题 正文
   local key="$1" sev="$2" title="$3" body="$4" last level
   if [ "$MODE" = "--check" ]; then
-    printf '  [%s] %s\n    %s\n' "$(echo "$sev" | tr a-z A-Z)" "$title" "$(printf '%s\n' "$body" | head -3)"
+    printf '  → 将告警[%s] %s\n    %s\n' "$sev" "$title" "$(printf '%s\n' "$body" | head -3)"
     return
   fi
   last="${LAST[$key]:-0}"
@@ -1001,7 +1008,7 @@ mem_pct() {
 }
 
 check_disk() {
-  local pct mnt sev skip igp
+  local pct mnt sev skip igp st cnt=0
   local igarr=()
   [ -n "$DISK_IGNORE" ] && IFS=',' read -ra igarr <<< "$DISK_IGNORE"
   while IFS=$'\t' read -r pct mnt; do
@@ -1009,7 +1016,10 @@ check_disk() {
     skip=0
     for igp in "${igarr[@]}"; do case "$mnt" in "$igp"*) skip=1; break;; esac; done
     [ "$skip" = 1 ] && continue
+    cnt=$((cnt+1))
     sev=$(sev_for "$pct" "$DISK_WARN" "$DISK_CRIT")
+    st=正常; [ -n "$sev" ] && st=$sev
+    print_status "磁盘 $mnt" "${pct}%" "告警${DISK_WARN}/严重${DISK_CRIT}" "$st"
     [ -n "$sev" ] || continue
     maybe_alert "disk:$mnt:$sev" "$sev" "💾 磁盘告警 ($sev)" \
 "挂载点 $mnt 使用率 ${pct}% (阈值 告警 ${DISK_WARN}% / 严重 ${DISK_CRIT}%)
@@ -1018,13 +1028,16 @@ check_disk() {
 $(df -h "$mnt" 2>/dev/null | tail -1)"
   done < <(df -x tmpfs -x devtmpfs -x squashfs -x iso9660 -x overlay -x fuse -x fuse.gvfsd-fuse --output=pcent,target 2>/dev/null \
            | awk 'NR>1{p=$1; sub(/%/,"",p); $1=""; sub(/^ +/,""); print p"\t"$0}')
+  [ "$MODE" = "--check" ] && [ "$cnt" -eq 0 ] && print_status "磁盘" "无" "告警${DISK_WARN}/严重${DISK_CRIT}" "无挂载点"
 }
 
 check_cpu() {
-  local p sev
+  local p sev st
   p=$(cpu_pct)
   [ -n "$p" ] || { log "CPU 采样失败, 跳过"; return; }
   sev=$(sev_for "$p" "$CPU_WARN" "$CPU_CRIT")
+  st=正常; [ -n "$sev" ] && st=$sev
+  print_status "CPU" "${p}%" "告警${CPU_WARN}/严重${CPU_CRIT}" "$st"
   [ -n "$sev" ] || return
   maybe_alert "cpu:$sev" "$sev" "🖥️ CPU 告警 ($sev)" \
 "CPU 使用率 ${p}% (阈值 告警 ${CPU_WARN}% / 严重 ${CPU_CRIT}%)
@@ -1034,10 +1047,12 @@ check_cpu() {
 }
 
 check_mem() {
-  local p sev
+  local p sev st
   p=$(mem_pct)
   [ -n "$p" ] || { log "内存采样失败, 跳过"; return; }
   sev=$(sev_for "$p" "$MEM_WARN" "$MEM_CRIT")
+  st=正常; [ -n "$sev" ] && st=$sev
+  print_status "内存" "${p}%" "告警${MEM_WARN}/严重${MEM_CRIT}" "$st"
   [ -n "$sev" ] || return
   maybe_alert "mem:$sev" "$sev" "🧠 内存告警 ($sev)" \
 "内存使用率 ${p}% (阈值 告警 ${MEM_WARN}% / 严重 ${MEM_CRIT}%)
@@ -1047,12 +1062,14 @@ $(free -h 2>/dev/null | head -2)"
 }
 
 check_load() {
-  local load sev
+  local load sev st
   load=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
-  [ -n "$load" ] || return
+  [ -n "$load" ] || { log "负载采样失败, 跳过"; return; }
   sev=""
   if ge "$load" "$LOAD_CRIT"; then sev=critical
   elif ge "$load" "$LOAD_WARN"; then sev=warning; fi
+  st=正常; [ -n "$sev" ] && st=$sev
+  print_status "负载" "$load" "告警${LOAD_WARN}/严重${LOAD_CRIT}" "$st"
   [ -n "$sev" ] || return
   maybe_alert "load:$sev" "$sev" "📊 负载告警 ($sev)" \
 "系统 1 分钟负载 ${load} (阈值 告警 ${LOAD_WARN} / 严重 ${LOAD_CRIT}, CPU 核数 ${CORES})
@@ -1063,6 +1080,7 @@ $(uptime)"
 
 run_once() {
   NOW=$(date +%s)
+  [ "$MODE" = "--check" ] && log "当前资源状态 (核心 ${CORES}, 阈值 CPU ${CPU_WARN}/${CPU_CRIT} 内存 ${MEM_WARN}/${MEM_CRIT} 磁盘 ${DISK_WARN}/${DISK_CRIT} 负载 ${LOAD_WARN}/${LOAD_CRIT})"
   check_disk
   check_cpu
   check_mem
@@ -1072,14 +1090,20 @@ run_once() {
 case "$MODE" in
   --check) run_once; log "干跑完成 (未发告警, 仅打印状态)" ;;
   --test)
+    cpu=$(cpu_pct); mem=$(mem_pct)
     "$ALERT" "🧪 资源监控测试告警" \
 "这是 resource-monitor 的测试告警, 收到表示资源告警链路已打通。
 
-服务器: $(hostname)
-CPU 核心: ${CORES}
-$(df -h 2>/dev/null | head -5)
-$(free -h 2>/dev/null | head -2)
-负载: $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)" "info" \
+服务器: $(hostname)  CPU 核心: ${CORES}
+CPU 使用率: ${cpu:-N/A}%
+内存使用率: ${mem:-N/A}%
+负载(1/5/15min): $(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)
+
+磁盘占用:
+$(df -h 2>/dev/null | head -6)
+
+内存:
+$(free -h 2>/dev/null | head -2)" "info" \
       && log "测试告警已发送" || log "测试告警发送失败 (检查 $ALERT / 渠道配置)"
     ;;
   --once) run_once; log "单次检查完成" ;;
