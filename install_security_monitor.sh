@@ -407,10 +407,15 @@ BODY="${2:--}"
 LEVEL="${3:-high}"
 [ "$BODY" = "-" ] && BODY="$(cat)"
 
+# 多服务器共用同一告警渠道时, 在标题前加 [主机名] 以便区分来源
+HOST="$(hostname 2>/dev/null || echo unknown)"
+[ -n "$HOST" ] && [ "$HOST" != "unknown" ] && TITLE="[${HOST}] ${TITLE}"
+
 echo "[$(date '+%F %T')] [$LEVEL] $TITLE :: $(echo "$BODY" | head -c 300)" >> /var/log/security-alert.log
 
 ok()   { echo -e "\033[1;32m[+]\033[0m $*"; }
 err()  { echo -e "\033[1;31m[-]\033[0m $*" >&2; }
+warn() { echo -e "\033[1;33m[!]\033[0m $*" >&2; }
 
 send_dingtalk() {
   [ -z "${DINGTALK_WEBHOOK:-}" ] && return 1
@@ -422,35 +427,68 @@ send_dingtalk() {
     enc=$(python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=''))" "$sign")
     url="${DINGTALK_WEBHOOK}&timestamp=${ts}&sign=${enc}"
   fi
-  local json
+  local json resp parsed ec msg
   json=$(python3 -c '
 import json,sys
 print(json.dumps({"msgtype":"markdown","markdown":{"title":sys.argv[1],"text":sys.argv[2][:19900]}}))' "$TITLE" "$BODY")
-  curl -sS -m 10 -H 'Content-Type: application/json' -d "$json" "$url" >/dev/null 2>&1 \
-    || { err "[钉钉] 发送失败"; return 1; }
-  ok "[钉钉] 已发送"
+  resp=$(curl -sS -m 10 -H 'Content-Type: application/json' -d "$json" "$url" 2>/dev/null) \
+    || { err "[钉钉] 网络错误(curl)"; return 1; }
+  # 钉钉失败也返回 HTTP 200 + {"errcode":非0,...}, 必须解析
+  parsed=$(printf '%s' "$resp" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except: print("?|非JSON响应"); raise SystemExit
+print("%s|%s" % (d.get("errcode","?"), (d.get("errmsg","") or "").replace("|","/")))')
+  IFS='|' read -r ec msg <<< "$parsed"
+  [ "$ec" = "0" ] && { ok "[钉钉] 已发送"; return 0; }
+  err "[钉钉] 发送失败 errcode=${ec}: ${msg}"
+  return 1
 }
 
 send_wechat() {
   [ -z "${WECHAT_WEBHOOK:-}" ] && return 1
-  local json
+  local json resp parsed ec msg
   json=$(python3 -c '
 import json,sys
 print(json.dumps({"msgtype":"markdown","markdown":{"content":"**"+sys.argv[1]+"**\n\n"+sys.argv[2][:4000]}}))' "$TITLE" "$BODY")
-  curl -sS -m 10 -H 'Content-Type: application/json' -d "$json" "$WECHAT_WEBHOOK" >/dev/null 2>&1 \
-    || { err "[企业微信] 发送失败"; return 1; }
-  ok "[企业微信] 已发送"
+  resp=$(curl -sS -m 10 -H 'Content-Type: application/json' -d "$json" "$WECHAT_WEBHOOK" 2>/dev/null) \
+    || { err "[企业微信] 网络错误(curl)"; return 1; }
+  # 企业微信失败也返回 HTTP 200 + {"errcode":非0,...}, 必须解析
+  parsed=$(printf '%s' "$resp" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except: print("?|非JSON响应"); raise SystemExit
+print("%s|%s" % (d.get("errcode","?"), (d.get("errmsg","") or "").replace("|","/")))')
+  IFS='|' read -r ec msg <<< "$parsed"
+  [ "$ec" = "0" ] && { ok "[企业微信] 已发送"; return 0; }
+  err "[企业微信] 发送失败 errcode=${ec}: ${msg}"
+  return 1
 }
 
 send_telegram() {
-  [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ] && return 1
-  curl -sS -m 10 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${TG_CHAT_ID}" \
-    --data-urlencode "text=[${LEVEL}] ${TITLE}
+  [ -z "${TG_BOT_TOKEN:-}" ] && return 1
+  [ -z "${TG_CHAT_ID:-}" ] && return 1
+  local resp parsed oks ec desc retry attempt=0
+  # Telegram 即便失败也返回 HTTP 200 + {"ok":false,"error_code":...,"parameters":{"retry_after":N}}
+  while :; do
+    resp=$(curl -sS -m 10 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+        --data-urlencode "chat_id=${TG_CHAT_ID}" \
+        --data-urlencode "text=[${LEVEL}] ${TITLE}
 
-${BODY}" >/dev/null 2>&1 \
-    || { err "[Telegram] 发送失败"; return 1; }
-  ok "[Telegram] 已发送"
+${BODY}" 2>/dev/null) || { err "[Telegram] 网络错误(curl)"; return 1; }
+    parsed=$(printf '%s' "$resp" | python3 -c 'import json,sys
+try: d=json.load(sys.stdin)
+except: print("0||非JSON响应|0"); raise SystemExit
+print("%s|%s|%s|%s" % ("1" if d.get("ok") else "0", d.get("error_code","") or "", (d.get("description","") or "").replace("|","/"), (d.get("parameters") or {}).get("retry_after",0) or 0))')
+    IFS='|' read -r oks ec desc retry <<< "$parsed"
+    [ "$oks" = "1" ] && { ok "[Telegram] 已发送"; return 0; }
+    if [ "${retry:-0}" -gt 0 ] && [ "$attempt" -lt 3 ]; then
+      attempt=$((attempt+1))
+      warn "[Telegram] 限流(429), ${retry}s 后重试(第${attempt}/3次)"
+      sleep "$retry"
+      continue
+    fi
+    err "[Telegram] 发送失败 error_code=${ec:-?}: ${desc}"
+    return 1
+  done
 }
 
 send_email() {

@@ -114,6 +114,24 @@ bash install_security_monitor.sh --auto
 | **Telegram** | 找 [@BotFather](https://t.me/BotFather) 创建 Bot 拿 Token；向 [@userinfobot](https://t.me/userinfobot) 发消息拿 Chat ID |
 | **邮件** | 任意支持 SMTP 的邮箱；QQ 邮箱等需用**授权码**而非登录密码 |
 
+## 告警脚本行为说明
+
+`/usr/local/bin/security-alert.sh` 是统一告警分发入口，Fail2ban/auditd/资源监控/每日日报/部署完成测试均调用它。几个关键行为：
+
+- **主机名前缀**：所有告警标题自动加 `[主机名]` 前缀（如 `[web01] 💾 磁盘告警`）。多台服务器共用同一个钉钉群/Telegram bot/邮箱时，一眼区分来源，无需在每个告警源单独配置。
+- **响应真实校验**：钉钉/企业微信/Telegram 的 API **失败也返回 HTTP 200**（带 `errcode≠0` 或 `"ok":false`），脚本解析 JSON 判断真实成败，失败如实报 `errcode`/`error_code` + 描述，**不会误报「已发送」**。
+- **Telegram 429 自动重试**：多机并发高频告警可能触发限流（`error_code=429` + `retry_after`），脚本按 `retry_after` 秒退避**最多重试 3 次**，仍失败才报错；重试期间不影响其它渠道。
+- **多服务器共用一个 Telegram bot**：脚本只发送（`sendMessage`）、不接收（不 `getUpdates`/不 webhook），无「抢 bot」冲突；唯一风险是上述 429 限流，已自动重试。
+- **告警日志**：每次分发都写一行到 `/var/log/security-alert.log`（保留 30 天，见 `/etc/logrotate.d/security-alert`），可 `tail -f` 追溯。
+- **手动调用**：
+  ```bash
+  /usr/local/bin/security-alert.sh "标题" "正文"            # 默认级别 high
+  /usr/local/bin/security-alert.sh "标题" "正文" info      # info/warn/high
+  /usr/local/bin/security-alert.sh "标题" - <<<"从 stdin 读正文"   # 长正文/管道
+  ```
+- **级别语义**：`info`（部署完成/解封等常规通知）、`warn`（资源警告级、新登录）、`high`（封禁、疑似爆破、可疑命令、资源严重级）。邮件主题带 `[安全告警]`，Telegram 文本带 `[级别]`。
+- **配置热更新**：改完 `/etc/security-monitor.conf`（渠道参数/资源阈值）**无需重启任何服务**——每次告警都是新进程重新 source 该 conf，下次触发即生效。
+
 ## Wazuh 说明
 
 - **版本自动检测**：优先使用在线检测到的最新正式版（GitHub API，超时 15s），失败回退内置默认 4.14；下载目录自动取主次版本号（如 4.14.7 → `packages.wazuh.com/4.14/`）
@@ -411,6 +429,8 @@ bash install_security_monitor.sh --uninstall   # 或 --remove / -u
 | 想监控 nginx/apache/ftp | 在 `/etc/fail2ban/jail.local` 添加对应监狱（如 `[nginx-http-auth] enabled = true`） |
 | 443 端口被占用 | 自动改 8443；或 `WAZUH_DASHBOARD_PORT=xxxx bash install_security_monitor.sh` |
 | 资源告警收不到 | `resource-monitor.sh --check` 看是否真超阈值；`--test` 测渠道；检查 `RES_DISK_IGNORE` 是否把目标盘忽略了，或阈值设得太高 |
+| 多台服务器共用一个 Telegram bot/群会冲突吗 | 不冲突（脚本只发送、不接收，不会“抢 bot”）。但多机并发高频告警可能触发 429 限流，脚本会按 `retry_after` 自动重试最多 3 次；钉钉/企微/Telegram 失败会显示真实 `errcode`/`error_code` 而非误报“已发送” |
+| 告警分不清是哪台服务器发的 | 所有告警标题由 `security-alert.sh` 自动加 `[主机名]` 前缀（如 `[web01] 💾 磁盘告警`），多机共用渠道也能一眼区分来源 |
 
 ## 安全提示
 
