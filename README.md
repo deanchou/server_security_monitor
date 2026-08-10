@@ -142,6 +142,155 @@ bash install_security_monitor.sh --auto
 - **全套安装**：10-20 分钟，内存不足会警告并带 `-i` 忽略官方检测（高风险，不建议 <4G 强装）
 - **agent 模式**：自动配置 manager 地址并重启 agent；如要注册 agent 需在 manager 上另行授权（`wazuh-agent` 官方注册流程）
 
+## Wazuh 安装后基础配置（实现基本安全检测）
+
+Wazuh 全套装好后，下面几步让它真正“在做检测”。核心结论：**Wazuh 自带的检测大多默认开启，主要做两件事——(1) 登录 Dashboard 确认/改密码，(2) 给要监控的服务器注册 Agent**；其余是确认与调优。
+
+### 0. 先理清“谁在被监控”
+
+- **本机（装了 manager 的这台）**：manager 自带 `agent 000`（即 manager 自己），**默认就跑 SCA / FIM / rootkit / 资产清单 / 漏洞扫描**，无需再装 agent。
+- **其它服务器**：必须装并注册 `wazuh-agent` 才能监控。本脚本只在主机装 Wazuh 全套，不自动装远端 agent。
+
+### 1. 登录 Dashboard + 改密码
+
+```bash
+# 1a. 取 admin 初始密码（wazuh-install.sh 生成时已存盘）
+cat /wazuh-install-files/wazuh-install-files/passwords.wazuh.txt 2>/dev/null | grep -A1 admin
+# 或重新生成/查看：
+# /var/ossec/scripts/wazuh-passwords-tool.sh -a   # 会随机化
+
+# 1b. 确认服务都起来了
+systemctl status wazuh-manager wazuh-indexer wazuh-dashboard --no-pager
+
+# 1c. 浏览器访问
+#   https://<本机IP>:<WAZUH_DASHBOARD_PORT，默认443，被占时8443>
+#   用户名 admin，密码见上
+```
+
+首次登录后建议立刻改 admin 密码：
+
+```bash
+/var/ossec/scripts/wazuh-passwords-tool.sh -u admin -p '你的强密码'
+```
+
+### 2. 注册被监控服务器的 Agent（关键步骤）
+
+> 只监控本机一台可跳过本节——manager(000) 已覆盖。
+
+**2a. 开防火墙端口（manager 侧）**：agent 与 manager 通信需要两个端口，安装脚本默认只开了 dashboard 端口，需补开：
+
+```bash
+# 1514/UDP  = agent 上报数据
+# 1515/TCP  = agent 注册(enrollment, authd)
+ufw allow 1514/udp 1515/tcp     # 或对应 iptables/firewalld
+```
+
+**2b. 用 Dashboard 向导注册（最省事）**：Dashboard → **Server management → Deploy new agents** → 选操作系统 → 填 agent IP（可选）→ 生成一条形如 `curl ... | sudo bash` 的一键安装命令，拷到被监控服务器执行。向导已把 manager 地址、注册口令烘焙进命令。
+
+或用命令行（manager 侧）：
+
+```bash
+/var/ossec/bin/manage_agents -a <agent_IP> -n <昵称>     # 注册
+/var/ossec/bin/manage_agents -l                          # 列出
+```
+
+被监控机装 agent 后编辑 `/var/ossec/etc/ossec.conf`：
+
+```xml
+<client>
+  <server><address>本机(manager)IP</address>...</server>
+</client>
+```
+
+重启 agent：`systemctl restart wazuh-agent`，在 Dashboard → Agents 看「Active」即连上。
+
+### 3. 基础安全检查（多数默认开，逐项确认即可）
+
+Wazuh 的检测由 agent 端采集 + manager 端规则解码两段组成。下面各项基本默认开启，确认 agent `ossec.conf` 没被关即可（manager 000 同理）：
+
+| 检查项 | ossec.conf 片段 | Dashboard 模块 | 默认 |
+|---|---|---|---|
+| **SCA 基线扫描**（CIS 配置合规）| `<sca><enabled>yes</enabled>` | Security Configuration Assessment | ✅开 |
+| **Rootkit/恶意软件**（隐藏进程/端口/可疑文件）| `<rootcheck>` | （并入 Security events）| ✅开 |
+| **文件完整性 FIM**（监控 `/etc`、`/usr/bin` 等关键目录）| `<syscheck>` | Integrity Monitoring | ✅开 |
+| **资产清单**（软件包/进程/端口/用户）| `<syscollector>` | Inventory | ✅开 |
+| **漏洞检测**（CVE 比对已装软件）| manager 端 `<vulnerability-detector>` | Vulnerabilities | ✅开但**需联网拉 CVE 源** |
+| **日志收集**（auth.log / syslog / 应用日志）| `<localfile>` | Security events | ✅开 |
+| **MITRE ATT&CK 映射** | 规则内置 tag | MITRE ATT&CK | ✅开 |
+
+确认某个 agent 是否真在跑这些（在被监控机执行）：
+
+```bash
+/var/ossec/bin/wazuh-control status        # 各子模块 running?
+grep -E '<sca|<syscheck|<rootcheck|<syscollector|<vulnerability' /var/ossec/etc/ossec.conf
+```
+
+**漏洞检测注意**：`<vulnerability-detector>` 默认开启但依赖 manager **联网下载 NVD / Debian / Canonical / RedHat 等 CVE 源**，离线环境拉不到源 → 该模块空白属正常。首次拉源要等几分钟~几十分钟。看进度：
+
+```bash
+tail -f /var/ossec/logs/ossec.log | grep -i vulnerab
+```
+
+### 4. 让 Wazuh 也消费你已有的 auditd（推荐，避免割裂）
+
+本脚本已在每台机装了 auditd + `audit-alert-watcher`（把高危审计事件推到你的 Telegram/钉钉/企微）。Wazuh 同样能解码 auditd 事件并映射 MITRE，建议让 **agent 读 `/var/log/audit/audit.log`**，在 Dashboard 里集中可见：
+
+在被监控机 `/var/ossec/etc/ossec.conf` 加：
+
+```xml
+<localfile>
+  <log_format>audit</log_format>
+  <location>/var/log/audit/audit.log</location>
+</localfile>
+```
+
+重启 agent：`systemctl restart wazuh-agent`。
+
+> 与本脚本 `audit-alert-watcher` 的分工建议：
+> - **Wazuh** → Dashboard 集中可视化、MITRE 映射、长期留存、合规报告；
+> - **audit-alert-watcher → security-alert.sh → IM 通道** → 实时手机推送。
+> 两者读同一份 `audit.log` 不冲突，互补。若嫌重复推送，可二选一（一般保留 IM 推送做即时、Wazuh 做分析）。
+
+### 5. 验证检测真的生效（30 秒自测）
+
+在任一被监控机触发几条事件，然后去 Dashboard → **Security events** 看是否亮灯：
+
+```bash
+# 触发 ① 账户变更
+sudo useradd -m testuser && sudo userdel -r testuser
+# 触发 ② FIM
+echo "wazuh-fim-test" | sudo tee -a /etc/wazuh-test      # 之后可删
+# 触发 ③ SCA 重跑
+/var/ossec/bin/wazuh-control restart client
+```
+
+manager 侧实时看告警：
+
+```bash
+tail -f /var/ossec/logs/alerts/alerts.json | python3 -m json.tool
+```
+
+Dashboard 各模块几秒~1分钟内应出现对应条目。若 Security events 空，多半是 agent 没连上（步骤 2 没做好）。
+
+### 6. 调优要点（可选，基础跑通后再做）
+
+1. **告警级别门槛**：Dashboard 默认显示 level ≥ 3。想只看高危，加 filter `rule.level >= 7`。level 12+ 多为入侵确证，可据此做 IM 推送门槛。
+2. **Agent 分组**：按角色建 group（web/db/dba…），下发不同 `ossec.conf`（不同 FIM 路径、不同 SCA 策略），比逐台改高效。
+3. **SCA 策略裁剪**：默认对每个 OS 都跑对应 CIS 策略，条目几百~上千。只关心强要求的，在 group 配置里 `policies` 只列你要的那几份，减少噪声。
+4. **FIM 白名单**：`/etc` 下高频变动文件（如 `/etc/resolv.conf`）加 `<ignore>`，避免告警刷屏。
+5. **Wazuh 告警进你的 IM**：Wazuh 全套模式已通过本脚本内置的 `custom-security` 集成，把 level ≥ `WAZUH_ALERT_LEVEL`（默认 10）的告警转发到钉钉/企业微信/Telegram（与本脚本的 fail2ban/auditd/资源监控共用同一套渠道配置）。改阈值改 `/etc/security-monitor.conf` 后无需重启 Wazuh（集成脚本每次调用重新读取）。
+
+### 小结清单（按顺序做）
+
+- [ ] 登录 Dashboard、改 admin 密码（步骤 1）
+- [ ] 若监控其它机：开 1514/1515、用向导注册 agent（步骤 2）
+- [ ] 确认 SCA/FIM/rootcheck/syscollector/vulnerability-detector 都 `yes`（步骤 3 表）
+- [ ] 让 agent 读 `audit.log`，与本脚本 watcher 互补（步骤 4）
+- [ ] 触发自测事件，Dashboard 各模块亮灯（步骤 5）
+- [ ] 按需做分组/SCA 裁剪/FIM 白名单（步骤 6）
+
+做到步骤 5，**“基本安全检查”就真正落地了**：配置基线合规、文件篡改、rootkit、资产清单、CVE 漏洞、登录/账户异常全在 Dashboard 可见，高危项还能经 `custom-security` 集成推到你手机。
+
 ## 生成的文件清单
 
 | 路径 | 说明 |
