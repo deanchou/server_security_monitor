@@ -1096,9 +1096,12 @@ maybe_alert() {  # key sev 标题 正文
 # ---- 各指标采样 ----
 cpu_pct() {  # 返回整数百分比(采样1秒)
   local a b t1 i1 t2 i2 dt di
-  a=$(awk '/^cpu /{idle=$5+$6; t=0; for(i=2;i<=NF;i++) t+=$i; print t,idle; exit}' /proc/stat 2>/dev/null)
+  # 用 printf "%d" 强制整数输出; 否则 uptime 长后 jiffies 累计超过 1e9,
+  # awk 默认 OFMT=%.6g 会打成科学计数法 (如 4.61278e+09),
+  # bash $(()) 无法解析 -> 'syntax error: invalid arithmetic operator'
+  a=$(awk '/^cpu /{idle=$5+$6; t=0; for(i=2;i<=NF;i++) t+=$i; printf "%d %d\n", t, idle; exit}' /proc/stat 2>/dev/null)
   sleep 1
-  b=$(awk '/^cpu /{idle=$5+$6; t=0; for(i=2;i<=NF;i++) t+=$i; print t,idle; exit}' /proc/stat 2>/dev/null)
+  b=$(awk '/^cpu /{idle=$5+$6; t=0; for(i=2;i<=NF;i++) t+=$i; printf "%d %d\n", t, idle; exit}' /proc/stat 2>/dev/null)
   read -r t1 i1 <<< "$a"; read -r t2 i2 <<< "$b"
   [ -n "$t1" ] && [ -n "$t2" ] || { echo 0; return; }
   dt=$((t2-t1)); di=$((i2-i1))
