@@ -540,6 +540,63 @@ actionunban = /usr/local/bin/security-alert.sh "✅ Fail2ban 解封" "IP <ip> �
 [Init]
 ACTEOF
 
+  # 推算 sshd 后端: 优先 systemd journal (现代发行版默认), 否则回退到文件后端
+  # 若不显式指定 backend, 某些系统会让 sshd 走 'auto' 并要求 /var/log/auth.log,
+  # 而纯 systemd 日志的系统没有该文件 -> 'Have not found any log file for sshd jail'
+  #
+  # systemd 后端要真正可用, 必须同时满足:
+  #   1) PID 1 == systemd  (排除容器里 /run/systemd/system 误判)
+  #   2) journalctl 能读到 ssh/sshd 日志
+  #   3) python3-systemd 已安装  (fail2ban 的 systemd 后端强依赖此模块, 缺失会
+  #      回退到文件后端, 而纯 journal 系统没有 /var/log/auth.log -> 启动报错)
+  local use_systemd=no log_file=""
+  if [ "$(ps -p 1 -o comm= 2>/dev/null | tr -d ' \n')" = "systemd" ] \
+     && command -v journalctl >/dev/null 2>&1 \
+     && journalctl -u ssh -u sshd --no-pager -n1 >/dev/null 2>&1; then
+    use_systemd=yes
+    if ! python3 -c 'import systemd' 2>/dev/null; then
+      warn "systemd journal 可用但缺少 python3-systemd, 尝试安装..."
+      if [ "$PKG" = "apt" ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y python3-systemd >/dev/null 2>&1 \
+          && log "python3-systemd 已安装" \
+          || { warn "python3-systemd 安装失败, 回退文件后端"; use_systemd=no; }
+      else
+        eval "\$INST python3-systemd" >/dev/null 2>&1 \
+          && log "python3-systemd 已安装" \
+          || { warn "python3-systemd 安装失败, 回退文件后端"; use_systemd=no; }
+      fi
+    fi
+  fi
+
+  if [ "$use_systemd" = yes ]; then
+    F2B_BACKEND="systemd"
+    F2B_LOGPATH_LINE=""   # systemd 后端不读 logpath, 留空不写入该行
+  else
+    F2B_BACKEND="auto"
+    # 选实际存在的 SSH 日志文件
+    for _f in /var/log/auth.log /var/log/secure; do
+      [ -f "$_f" ] && { log_file="$_f"; break; }
+    done
+    if [ -z "$log_file" ]; then
+      # 无 SSH 日志文件 (容器/纯 journal/未装 rsyslog 环境)
+      warn "未找到 SSH 日志文件 (/var/log/auth.log, /var/log/secure)"
+      # 尝试装 rsyslog 让 auth.log 实际有日志写入
+      if [ "$PKG" = "apt" ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y rsyslog >/dev/null 2>&1 \
+          && log "rsyslog 已安装 (将写入 /var/log/auth.log)" \
+          || warn "rsyslog 安装失败 (容器环境常见, sshd 可能日志走 stdout)"
+      else
+        eval "\$INST rsyslog" >/dev/null 2>&1 && log "rsyslog 已安装" || warn "rsyslog 安装失败"
+      fi
+      # 占位文件: 保证 fail2ban 能启动 (即使 rsyslog 未装/未运行也不会报错)
+      install -m 640 -o root -g adm /dev/null /var/log/auth.log 2>/dev/null || touch /var/log/auth.log
+      log_file="/var/log/auth.log"
+      warn "已创建占位 ${log_file}; 若 sshd 日志不写入此文件, sshd 监狱将无日志可分析"
+      warn "  确认: rsyslog 运行(systemctl status rsyslog) 或改用 systemd 后端(装 python3-systemd)"
+    fi
+    F2B_LOGPATH_LINE="logpath = ${log_file}"
+  fi
+
   cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 bantime  = ${F2B_BANTIME}
@@ -554,14 +611,22 @@ action = %(action_sec)s
 [sshd]
 enabled = true
 port    = ssh
+backend = ${F2B_BACKEND}
+${F2B_LOGPATH_LINE}
 EOF
 
   systemctl enable fail2ban >/dev/null 2>&1 || true
   systemctl restart fail2ban 2>/dev/null || service fail2ban restart || \
     warn "fail2ban 启动失败, 请检查日志 /var/log/fail2ban.log"
   sleep 2
-  fail2ban-client status sshd >/dev/null 2>&1 && log "Fail2ban 已运行, sshd 监狱已启用" \
-    || warn "fail2ban sshd 监狱未就绪, 可稍后手动执行: fail2ban-client status sshd"
+  if fail2ban-client status sshd >/dev/null 2>&1; then
+    log "Fail2ban 已运行, sshd 监狱已启用 (backend=${F2B_BACKEND})"
+  else
+    warn "fail2ban sshd 监狱未就绪, 排查:"
+    warn "  · 日志: tail -50 /var/log/fail2ban.log"
+    warn "  · 配置校验: fail2ban-client -t"
+    warn "  · 若非 systemd 日志系统, 确认 SSH 日志文件存在 (如 /var/log/auth.log)"
+  fi
 }
 # =============================== auditd =====================================
 set_auparam() {
