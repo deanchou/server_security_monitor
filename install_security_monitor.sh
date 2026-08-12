@@ -729,9 +729,14 @@ tail -n0 -F "$LOG" | while IFS= read -r line; do
         case "$n" in 5|10|20|40|80) alert "🚨 疑似暴力破解" "来自 ${addr} 的登录失败已达 ${n} 次" "high";; esac
       fi
       ;;
-    type=USER_ADD*|type=USER_DEL*|type=USER_CHAUTHTOK*)
+    # 注意: audit 类型字符串是 ADD_USER/DEL_USER/ADD_GROUP/DEL_GROUP/CHUSER_ID/
+    # CHGRP_ID/USER_CHAUTHTOK/USER_ROLE_CHANGE (内核常量名 AUDIT_USER_ADD 等,
+    # 但日志/ausearch 用的是反过来的字符串)。早期写 USER_ADD* 会匹配不到
+    # useradd/userdel 事件 -> 实时告警静默失效。
+    type=ADD_USER*|type=DEL_USER*|type=ADD_GROUP*|type=DEL_GROUP*|type=CHUSER_ID*|type=CHGRP_ID*|type=USER_CHAUTHTOK*|type=USER_ROLE_CHANGE*)
       acct=$(getf "$line" acct); id=$(getf "$line" id)
-      alert "👤 账户变更" "类型: $(echo "$line" | cut -d' ' -f1 | cut -d= -f2)  账户: ${acct} (uid=${id})" "high"
+      [ -n "$acct" ] || acct="-"
+      alert "👤 账户变更" "类型: $(echo "$line" | cut -d' ' -f1 | cut -d= -f2)  账户: ${acct} (uid=${id:-?})" "high"
       ;;
     type=EXECVE*)
       if echo "$line" | grep -qiE "$DANGEROUS_PATTERNS"; then
@@ -1263,7 +1268,7 @@ TMP=$(mktemp)
   echo "### 2. 今日登录失败次数: $(aureport -l -i --failed -ts today 2>/dev/null | grep -cE '^[0-9]+\.' )"
   echo ""
   echo "### 3. 今日账户变更"
-  ausearch -ts today -m USER_ADD,USER_DEL,USER_CHAUTHTOK 2>/dev/null | tail -20 || echo "无记录"
+  ausearch -ts today -m ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID,USER_CHAUTHTOK 2>/dev/null | tail -20 || echo "无记录"
   echo ""
   echo "### 4. 当前被 fail2ban 封禁的 IP"
   fail2ban-client status sshd 2>/dev/null | sed -n '/Banned IP list/,+1p' || echo "无封禁"
