@@ -342,7 +342,7 @@ install_base() {
     [ "$INSTALL_FAIL2BAN" = yes ] && pkgs="$pkgs fail2ban"
     [ "$INSTALL_AUDITD" = yes ] && pkgs="$pkgs audit"
     echo "$ALERT_CHANNELS" | grep -q email && pkgs="$pkgs mailx"
-    eval "$INST $pkgs"
+    eval "$INST $pkgs" || { warn "部分包安装失败, 尝试逐个补齐..."; for p in $pkgs; do eval "$INST $p" || warn "包 $p 安装失败"; done; }
   fi
   command -v python3 >/dev/null 2>&1 || die "缺少 python3, 无法完成安装"
   command -v curl    >/dev/null 2>&1 || die "缺少 curl"
@@ -399,6 +399,8 @@ PYEOF
 # 安全告警分发脚本
 # 用法: security-alert.sh <标题> <正文(或 - 表示从 stdin 读取)> [级别: info|warn|high]
 set -u
+# 日志若被删重建, 默认 umask 会让其 644 泄密(含告警正文片段), 强制 600
+umask 077
 CONF=/etc/security-monitor.conf
 [ -f "$CONF" ] && . "$CONF"
 
@@ -908,12 +910,14 @@ DEBCTL
   done
   [ "$dl_ok" = 1 ] || die "wazuh-install.sh 下载失败, 请检查网络; 或指定其他版本: WAZUH_VERSION=4.9 bash $0"
 
-  # 检测 Web 端口是否被占用, 被占用则自动改用 8443
-  if [ "$dash_port" = "443" ] && \
-     ( ss -tlnp 2>/dev/null | grep -q ':443 ' || netstat -tlnp 2>/dev/null | grep -q ':443 ' ); then
-    warn "端口 443 已被其他进程占用, Wazuh Web 控制台将改用 8443"
+  # 检测 Web 端口是否被占用, 被占用则自动改用 8443 (8443 也被占则提示)
+  if ss -tlnp 2>/dev/null | grep -q ":${dash_port} " || netstat -tlnp 2>/dev/null | grep -q ":${dash_port} "; then
+    warn "端口 ${dash_port} 已被其他进程占用, Wazuh Web 控制台将改用 8443"
     warn "如需其他端口: WAZUH_DASHBOARD_PORT=xxxx bash $0"
     dash_port=8443
+    if ss -tlnp 2>/dev/null | grep -q ':8443 ' || netstat -tlnp 2>/dev/null | grep -q ':8443 '; then
+      warn "8443 也被占用, 请用 WAZUH_DASHBOARD_PORT=<空闲端口> 重跑"
+    fi
   fi
   DASHBOARD_PORT_USED="$dash_port"
   log "Wazuh Web 控制台端口: ${dash_port}"
@@ -946,7 +950,7 @@ try:
             continue
         k, v = line.split("=", 1)
         try:
-            parts = shlex.split(v.strip(), comments=True)
+            parts = shlex.split(v.strip())
             conf[k.strip()] = parts[0] if parts else ""
         except Exception:
             conf[k.strip()] = v.strip().strip('"').strip("'")
@@ -1257,7 +1261,10 @@ setup_daily_report() {
 #!/usr/bin/env bash
 # 每日安全巡检摘要 (由 install_security_monitor.sh 生成)
 set -u
-. /etc/security-monitor.conf
+# cron 默认 PATH 仅 /usr/bin:/bin, 而 aureport/ausearch 在 /usr/sbin
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CONF=/etc/security-monitor.conf
+[ -f "$CONF" ] && . "$CONF"
 TMP=$(mktemp)
 {
   echo "## 📋 每日安全巡检报告 $(date '+%F %T')"
@@ -1283,6 +1290,8 @@ SUMEOF
 
   cat > /etc/cron.d/security-monitor <<'CRONEOF'
 SHELL=/bin/bash
+# cron 默认 PATH 不含 /usr/sbin, 必须显式设置, 否则 aureport/ausearch 找不到
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # 每日 08:00 推送安全巡检日报
 0 8 * * * root /usr/local/bin/security-daily-summary.sh >/dev/null 2>&1
 CRONEOF
