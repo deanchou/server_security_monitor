@@ -709,7 +709,10 @@ LOG=/var/log/audit/audit.log
 
 declare -A AUTHFAIL_CNT
 alert() { /usr/local/bin/security-alert.sh "$1" "$2" "${3:-high}"; }
-getf()  { echo "$1" | tr -d "\"'" | sed -n "s/.*$2=\([^ ]*\).*/\1/p" | head -1; }
+# 引号处理: 删双引号(让 exe="path" -> exe=path 紧贴), 单引号转空格(分隔 msg 内外层)。
+# 必须这样: 新版 auditd 在 res=success' 后紧追 UID="root" 增强字段且无空格,
+# 若直接 tr -d 删单引号, 会把 res=success 和 UID= 粘成 successUID=root -> 解析失败。
+getf()  { echo "$1" | tr -d '"' | tr "'" ' ' | sed -n "s/.*$2=\([^ ]*\).*/\1/p" | head -1; }
 
 # 仅匹配高置信度的反弹 shell / 管道执行远程脚本, 减少误报
 DANGEROUS_PATTERNS='/dev/tcp/|/dev/udp/|bash -i|sh -i|bash -c .*(ba)?sh|sh -c .*(ba)?sh|nc -[a-zA-Z0-9]*e |ncat -[a-zA-Z0-9]*e |socat -[a-zA-Z ]|curl[^|]*[|] *(ba)?sh|wget[^|]*[|] *(ba)?sh|echo.*>>.*/etc/passwd|echo.*>>.*/etc/sudoers'
@@ -718,7 +721,9 @@ echo "[*] 审计告警监控器已启动: $(date '+%F %T')"
 tail -n0 -F "$LOG" | while IFS= read -r line; do
   case "$line" in
     type=USER_LOGIN*)
-      acct=$(getf "$line" acct); addr=$(getf "$line" addr); exe=$(getf "$line" exe); res=$(getf "$line" res)
+      # USER_LOGIN 事件用 id= 而非 acct=, 需回退取用户名
+      acct=$(getf "$line" acct); [ -n "$acct" ] || acct=$(getf "$line" UID); [ -n "$acct" ] || acct=$(getf "$line" auid)
+      addr=$(getf "$line" addr); exe=$(getf "$line" exe); res=$(getf "$line" res)
       if [ "$res" = "success" ]; then
         alert "🖥 新登录" "用户 **${acct}** 通过 ${exe} 从 ${addr} 登录 ($(date '+%F %T'))" "warn"
       fi
