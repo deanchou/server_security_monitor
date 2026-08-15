@@ -68,6 +68,7 @@ F2B_MAXRETRY="${F2B_MAXRETRY:-5}"          # 窗口内失败次数
 F2B_FINDTIME="${F2B_FINDTIME:-10m}"        # 统计窗口
 F2B_BANTIME="${F2B_BANTIME:-1h}"           # 封禁时长
 F2B_IGNOREIP="${F2B_IGNOREIP:-127.0.0.1}"  # 白名单(空格分隔)
+F2B_SSH_PORT="${F2B_SSH_PORT:-}"           # SSH 端口(空=自动探测, 支持多端口空格分隔)
 
 # auditd
 AUDIT_EXECVE="${AUDIT_EXECVE:-yes}"        # 是否审计全部命令(日志量大)
@@ -288,6 +289,7 @@ interactive_config() {
     prompt F2B_FINDTIME "统计窗口(例: 10m/1h)" "$F2B_FINDTIME"
     prompt F2B_BANTIME "封禁时长(例: 1h/1d)" "$F2B_BANTIME"
     prompt F2B_IGNOREIP "白名单IP(空格分隔)" "$F2B_IGNOREIP"
+    prompt F2B_SSH_PORT "SSH 端口(回车=自动探测, 多端口空格分隔)" "${F2B_SSH_PORT:-$(detect_ssh_port)}"
   fi
   if [ "$INSTALL_AUDITD" = yes ]; then
     prompt AUDIT_EXECVE "是否审计全部命令执行 (yes/no, 日志量大)" "$AUDIT_EXECVE"
@@ -530,6 +532,23 @@ MAILYEOF
   fi
 }
 # ============================== Fail2ban ====================================
+# 自动探测 sshd 实际监听端口(sshd_config 里也可能只写 Port 不带 ListenAddress).
+# 注意: 若直接写 port = ssh, fail2ban 会按 /etc/services 解析成 22, 改了端口的 sshd
+# 封禁将不生效(防火墙只挡 22, 攻击者打真实端口不受影响).
+detect_ssh_port() {
+  local ports="" p
+  # 1) 实际监听端口 (最可靠, 包含 systemd socket / sshd -p / drop-in 配置)
+  ports=$(ss -tlnp 2>/dev/null | awk -F'[: ]+' '/sshd/{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="users") print $i}' | sort -u)
+  [ -z "$ports" ] && ports=$(ss -tlnp 2>/dev/null | grep -i sshd | awk '{print $4}' | awk -F: '{print $NF}' | grep -E '^[0-9]+$' | sort -u)
+  # 2) 回退: sshd_config Port 指令 (含 .d drop-in)
+  if [ -z "$ports" ]; then
+    ports=$(grep -hiE '^\s*Port\s+' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null | awk '{print $2}' | grep -E '^[0-9]+$' | sort -u)
+  fi
+  # 3) 兜底 22
+  [ -z "$ports" ] && ports=22
+  echo "$ports" | tr '\n' ' ' | sed 's/ *$//'
+}
+
 setup_fail2ban() {
   log "配置 Fail2ban (封禁 ${F2B_BANTIME}, 窗口 ${F2B_FINDTIME}, 阈值 ${F2B_MAXRETRY} 次)"
 
@@ -599,6 +618,15 @@ ACTEOF
     F2B_LOGPATH_LINE="logpath = ${log_file}"
   fi
 
+  # 确定要封禁的 SSH 端口: 显式指定 > 自动探测 > 22
+  if [ -z "${F2B_SSH_PORT:-}" ]; then
+    F2B_SSH_PORT=$(detect_ssh_port)
+    log "自动探测 SSH 端口: ${F2B_SSH_PORT}"
+  else
+    log "使用指定 SSH 端口: ${F2B_SSH_PORT}"
+  fi
+  # fail2ban 的 port 字段支持多端口(逗号或空格分隔); 保持原样写入
+
   cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 bantime  = ${F2B_BANTIME}
@@ -612,7 +640,7 @@ action = %(action_sec)s
 
 [sshd]
 enabled = true
-port    = ssh
+port    = ${F2B_SSH_PORT}
 backend = ${F2B_BACKEND}
 ${F2B_LOGPATH_LINE}
 EOF
@@ -622,7 +650,7 @@ EOF
     warn "fail2ban 启动失败, 请检查日志 /var/log/fail2ban.log"
   sleep 2
   if fail2ban-client status sshd >/dev/null 2>&1; then
-    log "Fail2ban 已运行, sshd 监狱已启用 (backend=${F2B_BACKEND})"
+    log "Fail2ban 已运行, sshd 监狱已启用 (backend=${F2B_BACKEND}, port=${F2B_SSH_PORT})"
   else
     warn "fail2ban sshd 监狱未就绪, 排查:"
     warn "  · 日志: tail -50 /var/log/fail2ban.log"
