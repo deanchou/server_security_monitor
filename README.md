@@ -151,6 +151,7 @@ bash install_security_monitor.sh --auto
 
 - **主机名前缀**：所有告警标题自动加 `[主机名]` 前缀（如 `[web01] 💾 磁盘告警`）。多台服务器共用同一个钉钉群/Telegram bot/邮箱时，一眼区分来源，无需在每个告警源单独配置。
 - **响应真实校验**：钉钉/企业微信/Telegram 的 API **失败也返回 HTTP 200**（带 `errcode≠0` 或 `"ok":false`），脚本解析 JSON 判断真实成败，失败如实报 `errcode`/`error_code` + 描述，**不会误报「已发送」**。
+- **Telegram 自动去 markdown**：告警正文含 `**粗体**`/`## 标题`/`- 列表`/`` `代码` `` 等 markdown 语法（钉钉/企业微信原生渲染），但 Telegram 不解析这些符号、会原样外露。脚本在发送前把 markdown 剥成纯文本（`**粗体**→粗体`、`## 标题→标题`、`- 项→• 项`、分割线删除），Telegram 显示干净可读，不依赖 `parse_mode`、不会因转义失败丢消息。
 - **Telegram 429 自动重试**：多机并发高频告警可能触发限流（`error_code=429` + `retry_after`），脚本按 `retry_after` 秒退避**最多重试 3 次**，仍失败才报错；重试期间不影响其它渠道。
 - **多服务器共用一个 Telegram bot**：脚本只发送（`sendMessage`）、不接收（不 `getUpdates`/不 webhook），无「抢 bot」冲突；唯一风险是上述 429 限流，已自动重试。
 - **告警日志**：每次分发都写一行到 `/var/log/security-alert.log`（保留 30 天，见 `/etc/logrotate.d/security-alert`），可 `tail -f` 追溯。

@@ -500,14 +500,29 @@ print("%s|%s" % (d.get("errcode","?"), (d.get("errmsg","") or "").replace("|","/
 send_telegram() {
   [ -z "${TG_BOT_TOKEN:-}" ] && return 1
   [ -z "${TG_CHAT_ID:-}" ] && return 1
-  local resp parsed oks ec desc retry attempt=0
+  local resp parsed oks ec desc retry attempt=0 text
+  # Telegram 不解析 markdown, 直接发送会让 **粗体** / ## 标题 / - 列表 / `代码` 等符号原样外露。
+  # 先把 markdown 语法剥成纯文本再发送 (Telegram 原生显示纯文本最稳, 无需 parse_mode)。
+  text=$(python3 -c '
+import re, sys
+t = "[{}] {}\n\n{}".format(sys.argv[1], sys.argv[2], sys.argv[3])
+t = re.sub(r"(?m)^[\-=*_]{3,}\s*$", "", t)        # 水平分割线 (---/***/===)
+t = re.sub(r"(?m)^#{1,6}\s+", "", t)               # 标题前缀 ## ### ####
+t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)             # **粗体**
+t = re.sub(r"__(.+?)__", r"\1", t)                 # __粗体__
+t = re.sub(r"\*(.+?)\*", r"\1", t)                 # *斜体*
+t = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", t)     # _斜体_ (不伤路径/标识符里的下划线)
+t = re.sub(r"`([^`]+)`", r"\1", t)                # `行内代码`
+t = re.sub(r"(?m)^[\-*]\s+", "• ", t)              # 列表项 - /* -> •
+print(t)' "$LEVEL" "$TITLE" "$BODY" 2>/dev/null) || text="[${LEVEL}] ${TITLE}
+
+${BODY}"
   # Telegram 即便失败也返回 HTTP 200 + {"ok":false,"error_code":...,"parameters":{"retry_after":N}}
   while :; do
     resp=$(curl -sS -m 10 "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
         --data-urlencode "chat_id=${TG_CHAT_ID}" \
-        --data-urlencode "text=[${LEVEL}] ${TITLE}
-
-${BODY}" 2>/dev/null) || { err "[Telegram] 网络错误(curl)"; return 1; }
+        --data-urlencode "disable_web_page_preview=true" \
+        --data-urlencode "text=${text}" 2>/dev/null) || { err "[Telegram] 网络错误(curl)"; return 1; }
     parsed=$(printf '%s' "$resp" | python3 -c 'import json,sys
 try: d=json.load(sys.stdin)
 except: print("0||非JSON响应|0"); raise SystemExit
@@ -589,6 +604,11 @@ actionban   = /usr/local/bin/security-alert.sh "🚫 Fail2ban 封禁" "IP <ip> �
 actionunban = /usr/local/bin/security-alert.sh "✅ Fail2ban 解封" "IP <ip> 已解封 (服务 <port>/<protocol>)" "info"
 
 [Init]
+# 兜底默认值; 实际端口/协议由 jail.local 的 action_sec 通过
+# security-alert[port="%(port)s", protocol="%(protocol)s"] 显式传入,
+# 避免 <port>/<protocol> 标签未被解析而原样外露在告警正文里
+port = ssh
+protocol = tcp
 ACTEOF
 
   # 推算 sshd 后端: 优先 systemd journal (现代发行版默认), 否则回退到文件后端
@@ -664,8 +684,9 @@ findtime = ${F2B_FINDTIME}
 maxretry = ${F2B_MAXRETRY}
 ignoreip = ${F2B_IGNOREIP}
 # 默认动作 = iptables 封禁 + 告警通知
+# 显式把 jail 的 port/protocol 传给 security-alert 动作, 否则其 <port>/<protocol> 标签不会解析
 action_sec = %(action_)s
-             security-alert
+             security-alert[port="%(port)s", protocol="%(protocol)s"]
 action = %(action_sec)s
 
 [sshd]
@@ -1037,6 +1058,19 @@ ts = alert.get("timestamp", "")
 agent = (data.get("agent") or {}).get("name", "-")
 full = alert.get("full_log") or json.dumps(alert.get("data", {}), ensure_ascii=False)[:1500]
 
+# Telegram 不解析 markdown, 原始符号会外露, 这里剥成纯文本
+import re as _re
+def md_strip(s):
+    s = _re.sub(r"(?m)^[\-=*_]{3,}\s*$", "", s)
+    s = _re.sub(r"(?m)^#{1,6}\s+", "", s)
+    s = _re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = _re.sub(r"__(.+?)__", r"\1", s)
+    s = _re.sub(r"\*(.+?)\*", r"\1", s)
+    s = _re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", s)
+    s = _re.sub(r"`([^`]+)`", r"\1", s)
+    s = _re.sub(r"(?m)^[\-*]\s+", "• ", s)
+    return s
+
 text = "**Wazuh 告警 (Level %s)**\n\n- 时间: %s\n- 主机: %s\n- 规则: %s\n- 详情: %s" % (
     level, ts, agent, desc, full)
 
@@ -1066,7 +1100,8 @@ if "wechat" in channels and conf.get("WECHAT_WEBHOOK"):
         json.dumps({"msgtype": "markdown", "markdown": {"content": text[:4000]}}).encode())
 
 if "telegram" in channels and conf.get("TG_BOT_TOKEN") and conf.get("TG_CHAT_ID"):
-    body = urllib.parse.urlencode({"chat_id": conf["TG_CHAT_ID"], "text": text,
+    tg_text = md_strip(text)
+    body = urllib.parse.urlencode({"chat_id": conf["TG_CHAT_ID"], "text": tg_text,
         "disable_web_page_preview": "true"}).encode()
     post("https://api.telegram.org/bot%s/sendMessage" % conf["TG_BOT_TOKEN"], body)
 PYEOF
