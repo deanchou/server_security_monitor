@@ -500,12 +500,21 @@ print("%s|%s" % (d.get("errcode","?"), (d.get("errmsg","") or "").replace("|","/
 send_telegram() {
   [ -z "${TG_BOT_TOKEN:-}" ] && return 1
   [ -z "${TG_CHAT_ID:-}" ] && return 1
-  local resp parsed oks ec desc retry attempt=0 text
+  local resp parsed oks ec desc retry attempt=0 text lvl_emoji
+  # 级别 -> emoji: 替代原先的 [info]/[warn]/[high] 文本前缀
+  case "$LEVEL" in
+    info) lvl_emoji="🟢" ;;
+    warn) lvl_emoji="🟡" ;;
+    high) lvl_emoji="🔴" ;;
+    *)    lvl_emoji="🔴" ;;
+  esac
   # Telegram 不解析 markdown, 直接发送会让 **粗体** / ## 标题 / - 列表 / `代码` 等符号原样外露。
-  # 先把 markdown 语法剥成纯文本再发送 (Telegram 原生显示纯文本最稳, 无需 parse_mode)。
+  # 先把 markdown 语法剥成纯文本再发送 (Telegram 原生显示纯文本最稳, 无需 parse_mode);
+  # 同时把级别前缀从文本 [info]/[warn]/[high] 换成 emoji 图标。
   text=$(python3 -c '
 import re, sys
-t = "[{}] {}\n\n{}".format(sys.argv[1], sys.argv[2], sys.argv[3])
+lvl = {"info":"🟢","warn":"🟡","high":"🔴"}.get(sys.argv[1], sys.argv[1])
+t = "{} {}\n\n{}".format(lvl, sys.argv[2], sys.argv[3])
 t = re.sub(r"(?m)^[\-=*_]{3,}\s*$", "", t)        # 水平分割线 (---/***/===)
 t = re.sub(r"(?m)^#{1,6}\s+", "", t)               # 标题前缀 ## ### ####
 t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)             # **粗体**
@@ -514,7 +523,7 @@ t = re.sub(r"\*(.+?)\*", r"\1", t)                 # *斜体*
 t = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", t)     # _斜体_ (不伤路径/标识符里的下划线)
 t = re.sub(r"`([^`]+)`", r"\1", t)                # `行内代码`
 t = re.sub(r"(?m)^[\-*]\s+", "• ", t)              # 列表项 - /* -> •
-print(t)' "$LEVEL" "$TITLE" "$BODY" 2>/dev/null) || text="[${LEVEL}] ${TITLE}
+print(t)' "$LEVEL" "$TITLE" "$BODY" 2>/dev/null) || text="${lvl_emoji} ${TITLE}
 
 ${BODY}"
   # Telegram 即便失败也返回 HTTP 200 + {"ok":false,"error_code":...,"parameters":{"retry_after":N}}

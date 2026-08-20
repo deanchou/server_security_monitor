@@ -161,7 +161,7 @@ bash install_security_monitor.sh --auto
   /usr/local/bin/security-alert.sh "标题" "正文" info      # info/warn/high
   /usr/local/bin/security-alert.sh "标题" - <<<"从 stdin 读正文"   # 长正文/管道
   ```
-- **级别语义**：`info`（部署完成/解封等常规通知）、`warn`（资源警告级、新登录）、`high`（封禁、疑似爆破、可疑命令、资源严重级）。邮件主题带 `[安全告警]`，Telegram 文本带 `[级别]`。
+- **级别语义**：`info`（部署完成/解封等常规通知）、`warn`（资源警告级、新登录）、`high`（封禁、疑似爆破、可疑命令、资源严重级）。邮件主题带 `[安全告警]`，Telegram 文本带级别 emoji（🟢 info / 🟡 warn / 🔴 high）替代原 `[info]`/`[warn]`/`[high]` 文本前缀。
 - **配置热更新**：改完 `/etc/security-monitor.conf`（渠道参数/资源阈值）**无需重启任何服务**——每次告警都是新进程重新 source 该 conf，下次触发即生效。
 
 ## Wazuh 说明
