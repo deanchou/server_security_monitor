@@ -14,6 +14,8 @@
 #    [3] Wazuh Agent   - 上报到已有的 Wazuh manager
 #    [4] Wazuh 全套    - 本机部署 manager+indexer+dashboard (需 >=4G 内存)
 #    [5] 每日巡检日报   - 每天 08:00 推送安全摘要
+#    [6] 资源监控      - CPU/内存/磁盘/负载 超阈值实时告警
+#    [7] 时区修改      - 设置系统时区 (上海/北京/巴基斯坦/印尼首都雅加达)
 #
 #  告警渠道 (可多选): 钉钉 / 企业微信 / Telegram / 邮件
 #
@@ -90,6 +92,10 @@ INSTALL_AUDITD="${INSTALL_AUDITD:-no}"
 INSTALL_WAZUH="${INSTALL_WAZUH:-none}"    # none / agent / full
 INSTALL_DAILY="${INSTALL_DAILY:-no}"
 INSTALL_RESOURCE_MONITOR="${INSTALL_RESOURCE_MONITOR:-no}"
+INSTALL_TIMEZONE="${INSTALL_TIMEZONE:-no}"
+# 时区 (仅 INSTALL_TIMEZONE=yes 时生效): 上海/北京/巴基斯坦/印度尼西亚(首都)
+#   自动模式直接填: TIMEZONE=Asia/Shanghai | Asia/Karachi | Asia/Jakarta 或 中文名
+TIMEZONE="${TIMEZONE:-}"
 
 # ============================== 工具函数 ====================================
 C_GREEN="\033[1;32m"; C_YELLOW="\033[1;33m"; C_RED="\033[1;31m"; C_CYAN="\033[1;36m"; C_OFF="\033[0m"
@@ -178,11 +184,12 @@ interactive_config() {
     "4|Wazuh 全套   - 本机整套部署 (需 >=4G 内存)" \
     "5|每日巡检日报  - 每天08:00推送安全摘要" \
     "6|资源监控     - CPU/内存/磁盘/负载 超阈值实时告警" \
-    "all|推荐全套(Fail2ban+auditd+每日日报+资源监控, 不含 Wazuh)"
+    "7|时区修改     - 设置系统时区 (上海/北京/巴基斯坦/印尼首都)" \
+    "all|推荐全套(Fail2ban+auditd+每日日报+资源监控+时区, 不含 Wazuh)"
   local n
-  INSTALL_FAIL2BAN=no; INSTALL_AUDITD=no; INSTALL_WAZUH=none; INSTALL_DAILY=no; INSTALL_RESOURCE_MONITOR=no
+  INSTALL_FAIL2BAN=no; INSTALL_AUDITD=no; INSTALL_WAZUH=none; INSTALL_DAILY=no; INSTALL_RESOURCE_MONITOR=no; INSTALL_TIMEZONE=no
   case "$COMP_SEL" in
-    all) INSTALL_FAIL2BAN=yes; INSTALL_AUDITD=yes; INSTALL_DAILY=yes; INSTALL_RESOURCE_MONITOR=yes ;;
+    all) INSTALL_FAIL2BAN=yes; INSTALL_AUDITD=yes; INSTALL_DAILY=yes; INSTALL_RESOURCE_MONITOR=yes; INSTALL_TIMEZONE=yes ;;
     *) IFS=',' read -ra comp_arr <<< "$COMP_SEL"
        for n in "${comp_arr[@]}"; do
          n="${n## }"; n="${n%% }"
@@ -193,11 +200,12 @@ interactive_config() {
            4) INSTALL_WAZUH="full" ;;
            5) INSTALL_DAILY=yes ;;
            6) INSTALL_RESOURCE_MONITOR=yes ;;
+           7) INSTALL_TIMEZONE=yes ;;
            *) warn "忽略未知组件选项: $n" ;;
          esac
        done ;;
   esac
-  if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ] && [ "$INSTALL_RESOURCE_MONITOR" = no ]; then
+  if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ] && [ "$INSTALL_RESOURCE_MONITOR" = no ] && [ "$INSTALL_TIMEZONE" = no ]; then
     die "未选择任何组件, 退出安装"
   fi
 
@@ -294,6 +302,26 @@ interactive_config() {
   if [ "$INSTALL_AUDITD" = yes ]; then
     prompt AUDIT_EXECVE "是否审计全部命令执行 (yes/no, 日志量大)" "$AUDIT_EXECVE"
   fi
+  # ---------- 5.5 时区设置 ----------
+  if [ "$INSTALL_TIMEZONE" = yes ]; then
+    echo ""
+    echo -e "${C_CYAN}--- 时区设置 ---${C_OFF}"
+    echo -e "  请选择要设置的时区:"
+    echo -e "    1 ) 上海 (Asia/Shanghai, UTC+8)"
+    echo -e "    2 ) 北京 (Asia/Shanghai, UTC+8)"
+    echo -e "    3 ) 巴基斯坦 (Asia/Karachi, UTC+5)"
+    echo -e "    4 ) 印度尼西亚首都·雅加达 (Asia/Jakarta, UTC+7)"
+    if ! read -r tzsel; then echo ""; die "输入已中断 (EOF), 安装取消"; fi
+    case "${tzsel:-1}" in
+      1|shanghai|Shanghai|Asia/Shanghai) TIMEZONE="Asia/Shanghai" ;;
+      2|beijing|北京|Asia/Beijing)           TIMEZONE="Asia/Shanghai" ;;
+      3|pakistan|巴基斯坦|Asia/Karachi)       TIMEZONE="Asia/Karachi" ;;
+      4|indonesia|jakarta|印度尼西亚|雅加达|Asia/Jakarta) TIMEZONE="Asia/Jakarta" ;;
+      *) warn "未知时区选项 \"$tzsel\" (${tzsel:-空}), 使用默认上海"; TIMEZONE="Asia/Shanghai" ;;
+    esac
+    log "将设置系统时区为: ${TIMEZONE}"
+  fi
+
   if [ "$INSTALL_RESOURCE_MONITOR" = yes ]; then
     echo ""
     echo -e "${C_CYAN}--- 资源监控参数 (直接回车用默认, 负载阈值自动取 CPU 核数) ---${C_OFF}"
@@ -317,6 +345,7 @@ interactive_config() {
   [ "$INSTALL_WAZUH" != none ] && comps="${comps:+$comps, }Wazuh($INSTALL_WAZUH)"
   [ "$INSTALL_DAILY" = yes ] && comps="${comps:+$comps, }每日巡检日报"
   [ "$INSTALL_RESOURCE_MONITOR" = yes ] && comps="${comps:+$comps, }资源监控"
+  [ "$INSTALL_TIMEZONE" = yes ] && comps="${comps:+$comps, }时区设置(${TIMEZONE:-默认})"
   echo "  组件      : ${comps:-无}"
   echo "  告警渠道  : ${ALERT_CHANNELS:-未配置(仅本地日志)}"
   echo "$ALERT_CHANNELS" | grep -q dingtalk && [ -n "$DINGTALK_WEBHOOK" ] && echo "  钉钉      : ${DINGTALK_WEBHOOK}"
@@ -1341,6 +1370,66 @@ CRONEOF
 LGEOF
   log "日报与日志轮转已配置"
 }
+# ================================ 时区设置 ===================================
+# 支持将系统时区改为以下选项:
+#   上海 / 北京            -> Asia/Shanghai (UTC+8)
+#   巴基斯坦               -> Asia/Karachi  (UTC+5)
+#   印度尼西亚首都(雅加达) -> Asia/Jakarta  (UTC+7)
+# 首次修改会备份原 /etc/localtime 到 /etc/security-monitor-tz.orig, 卸载时可还原。
+normalize_timezone() {  # TIMEZONE -> 规范化 tz 名
+  case "$1" in
+    ""|Asia/Shanghai|shanghai|上海|UTC+8|beijing|Beijing|北京)
+      echo "Asia/Shanghai" ;;
+    Asia/Karachi|pakistan|Pakistan|巴基斯坦|PKT|UTC+5)
+      echo "Asia/Karachi" ;;
+    Asia/Jakarta|indonesia|Indonesia|印度尼西亚|雅加达|jakarta|Jakarta|WIB|UTC+7)
+      echo "Asia/Jakarta" ;;
+    *)
+      echo "$1" ;;  # 其他原样 (如 Asia/Tokyo), 存在 zoneinfo 文件即生效
+  esac
+}
+
+setup_timezone() {
+  local tz
+  tz=$(normalize_timezone "$TIMEZONE")
+  [ -n "$tz" ] || { warn "时区为空, 跳过"; return; }
+  if [ ! -f "/usr/share/zoneinfo/$tz" ]; then
+    warn "时区文件不存在: /usr/share/zoneinfo/$tz , 跳过 (可用如 Asia/Tokyo)"
+    return
+  fi
+  # sysvinit 系统没有 /etc/timezone (仅 /etc/localtime), 判断是否用该文件
+  local with_timezone_file=no
+  [ -e /etc/timezone ] && with_timezone_file=yes
+
+  # 首次修改时备份原时区, 供卸载还原
+  if [ ! -f /etc/security-monitor-tz.orig ]; then
+    [ -f /etc/localtime ] && cp -a /etc/localtime /etc/security-monitor-tz.orig 2>/dev/null || true
+    log "已备份原时区到 /etc/security-monitor-tz.orig"
+  fi
+
+  log "正在设置系统时区: ${tz} ..."
+  if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-timezone "$tz" 2>/dev/null \
+      || ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime 2>/dev/null
+  else
+    ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime 2>/dev/null
+  fi
+  if [ "$with_timezone_file" = yes ]; then
+    echo "$tz" > /etc/timezone
+  fi
+
+  local now
+  now=$(date '+%Z %z %F %T')
+  log "时区已设置为 ${tz}, 当前系统时间: ${now}"
+
+  # 让每日 08:00 日报按新时区执行 (cron 使用系统时区默认即可, 但显式声明更稳;
+  # 仅当日报 cron 存在且尚未写 TZ 时追加一行)
+  if [ -f /etc/cron.d/security-monitor ] && ! grep -qE '^TZ=' /etc/cron.d/security-monitor; then
+    sed -i "/^PATH=/a\\TZ=${tz}" /etc/cron.d/security-monitor
+    log "已为日报 cron 写入时区 (TZ=${tz})"
+  fi
+}
+
 # =============================== 收尾 =======================================
 test_alerts() {
   if [ -z "$ALERT_CHANNELS" ]; then
@@ -1357,6 +1446,7 @@ test_alerts() {
   [ "$INSTALL_WAZUH" != none ] && comps="${comps:+$comps }Wazuh($INSTALL_WAZUH)"
   [ "$INSTALL_DAILY" = yes ] && comps="${comps:+$comps }每日巡检日报"
   [ "$INSTALL_RESOURCE_MONITOR" = yes ] && comps="${comps:+$comps }资源监控"
+  [ "$INSTALL_TIMEZONE" = yes ] && comps="${comps:+$comps }时区设置(${TIMEZONE:-})"
   local body="服务器: ${host} (${ip})
 
 已部署组件: ${comps:-无}
@@ -1404,12 +1494,14 @@ summary() {
 }
 # ================================ 卸载模式 ==================================
 detect_installed() {
-  HAVE_FAIL2BAN=no; HAVE_AUDITD=no; HAVE_WAZUH=none; HAVE_DAILY=no; HAVE_ALERT=no; HAVE_RESOURCE_MONITOR=no
+  HAVE_FAIL2BAN=no; HAVE_AUDITD=no; HAVE_WAZUH=none; HAVE_DAILY=no; HAVE_ALERT=no; HAVE_RESOURCE_MONITOR=no; HAVE_TIMEZONE=no
   if [ -f /etc/fail2ban/jail.local ] || [ -f /etc/fail2ban/action.d/security-alert.conf ]; then HAVE_FAIL2BAN=yes; fi
   if [ -f /etc/audit/rules.d/security.rules ]; then HAVE_AUDITD=yes; fi
   if [ -f /etc/cron.d/security-monitor ]; then HAVE_DAILY=yes; fi
   if [ -f /usr/local/bin/security-alert.sh ]; then HAVE_ALERT=yes; fi
   if [ -f /etc/systemd/system/resource-monitor.service ] || [ -f /usr/local/bin/resource-monitor.sh ]; then HAVE_RESOURCE_MONITOR=yes; fi
+  # 脚本备份过原时区说明用过时区功能
+  if [ -f /etc/security-monitor-tz.orig ]; then HAVE_TIMEZONE=yes; fi
   if { command -v dpkg >/dev/null 2>&1 && dpkg -l wazuh-manager 2>/dev/null | grep -q '^ii'; } || { command -v rpm >/dev/null 2>&1 && rpm -q wazuh-manager >/dev/null 2>&1; }; then
     HAVE_WAZUH=full
   elif { command -v dpkg >/dev/null 2>&1 && dpkg -l wazuh-agent 2>/dev/null | grep -q '^ii'; } || { command -v rpm >/dev/null 2>&1 && rpm -q wazuh-agent >/dev/null 2>&1; }; then
@@ -1464,6 +1556,24 @@ cleanup_resource_monitor() {
   log "资源监控已清理"
 }
 
+cleanup_timezone() {
+  log "还原系统时区并清理..."
+  # 还原到脚本修改前的时区
+  if [ -f /etc/security-monitor-tz.orig ]; then
+    cp -a /etc/security-monitor-tz.orig /etc/localtime 2>/dev/null \
+      && log "已还原原系统时区 (/etc/localtime 来自安装前备份)" \
+      || warn "还原原时区失败, 请手动执行: timedatectl set-timezone <原时区>"
+  else
+    warn "未找到 /etc/security-monitor-tz.orig, 跳过还原 (当前时区不变)"
+  fi
+  # 移除我们给日报 cron 加的 TZ 行
+  if [ -f /etc/cron.d/security-monitor ]; then
+    sed -i '/^TZ=/d' /etc/cron.d/security-monitor 2>/dev/null || true
+  fi
+  rm -f /etc/security-monitor-tz.orig
+  log "时区清理完成 (当前: $(date '+%Z %z'))"
+}
+
 cleanup_wazuh() {
   if [ "$HAVE_WAZUH" = full ]; then
     log "卸载 Wazuh 全套 (将移除 wazuh-manager/indexer/dashboard/agent 全部组件)..."
@@ -1510,6 +1620,7 @@ uninstall() {
   echo "    Wazuh             : $([ "$HAVE_WAZUH" != none ] && echo "已安装 ($HAVE_WAZUH)" || echo 未检测到)"
   echo "    每日巡检日报      : $([ "$HAVE_DAILY" = yes ] && echo 已安装 || echo 未检测到)"
   echo "    资源监控          : $([ "$HAVE_RESOURCE_MONITOR" = yes ] && echo 已安装 || echo 未检测到)"
+  echo "    (时区)            : $([ "$HAVE_TIMEZONE" = yes ] && echo "曾修改过(可还原到安装前)" || echo 未检测到)"
   echo "    告警脚本与配置    : $([ "$HAVE_ALERT" = yes ] && echo 已安装 || echo 未检测到)"
   echo ""
 
@@ -1519,20 +1630,21 @@ uninstall() {
     "3|Wazuh ($HAVE_WAZUH)" \
     "4|每日巡检日报" \
     "5|告警脚本与配置" \
-    "6|资源监控"
+    "6|资源监控" \
+    "7|时区(还原到安装前)"
 
   prompt REMOVE_PKGS "是否同时卸载软件包 (y=卸载包, n=仅删配置, 默认 n)" "n"
   case "$(printf '%s' "$REMOVE_PKGS" | tr 'A-Z' 'a-z')" in y|yes) REMOVE_PKGS=y ;; *) REMOVE_PKGS=n ;; esac
 
   local n
-  DO_FAIL2BAN=no; DO_AUDITD=no; DO_WAZUH=no; DO_DAILY=no; DO_ALERT=no; DO_RESOURCE_MONITOR=no
+  DO_FAIL2BAN=no; DO_AUDITD=no; DO_WAZUH=no; DO_DAILY=no; DO_ALERT=no; DO_RESOURCE_MONITOR=no; DO_TIMEZONE=no
   case "$DEL_SEL" in
-    all) DO_FAIL2BAN=yes; DO_AUDITD=yes; DO_WAZUH=yes; DO_DAILY=yes; DO_ALERT=yes; DO_RESOURCE_MONITOR=yes ;;
+    all) DO_FAIL2BAN=yes; DO_AUDITD=yes; DO_WAZUH=yes; DO_DAILY=yes; DO_ALERT=yes; DO_RESOURCE_MONITOR=yes; DO_TIMEZONE=yes ;;
     *) IFS=',' read -ra d_arr <<< "$DEL_SEL"
        for n in "${d_arr[@]}"; do
          n="${n## }"; n="${n%% }"
          case "$n" in
-           1) DO_FAIL2BAN=yes ;; 2) DO_AUDITD=yes ;; 3) DO_WAZUH=yes ;; 4) DO_DAILY=yes ;; 5) DO_ALERT=yes ;; 6) DO_RESOURCE_MONITOR=yes ;;
+           1) DO_FAIL2BAN=yes ;; 2) DO_AUDITD=yes ;; 3) DO_WAZUH=yes ;; 4) DO_DAILY=yes ;; 5) DO_ALERT=yes ;; 6) DO_RESOURCE_MONITOR=yes ;; 7) DO_TIMEZONE=yes ;;
            *) warn "忽略未知卸载选项: $n" ;;
          esac
        done ;;
@@ -1546,6 +1658,7 @@ uninstall() {
   [ "$DO_WAZUH" = yes ] && items="${items:+$items, }Wazuh"
   [ "$DO_DAILY" = yes ] && items="${items:+$items, }每日日报"
   [ "$DO_RESOURCE_MONITOR" = yes ] && items="${items:+$items, }资源监控"
+  [ "$DO_TIMEZONE" = yes ] && items="${items:+$items, }时区(还原)"
   [ "$DO_ALERT" = yes ] && items="${items:+$items, }告警配置"
   echo "  将清理: ${items:-无}"
   echo "  是否卸载软件包: $REMOVE_PKGS"
@@ -1557,6 +1670,7 @@ uninstall() {
   [ "$DO_WAZUH" = yes ] && cleanup_wazuh
   [ "$DO_DAILY" = yes ] && cleanup_daily
   [ "$DO_RESOURCE_MONITOR" = yes ] && cleanup_resource_monitor
+  [ "$DO_TIMEZONE" = yes ] && cleanup_timezone
   [ "$DO_ALERT" = yes ] && cleanup_alert
   log "卸载完成!"
 }
@@ -1581,7 +1695,7 @@ main() {
     # 自动模式: 组件开关需显式指定 (环境变量), 否则跳过
     log "自动模式: 组件开关 INSTALL_FAIL2BAN=$INSTALL_FAIL2BAN INSTALL_AUDITD=$INSTALL_AUDITD INSTALL_WAZUH=$INSTALL_WAZUH INSTALL_DAILY=$INSTALL_DAILY INSTALL_RESOURCE_MONITOR=$INSTALL_RESOURCE_MONITOR"
     log "自动模式: 告警渠道 ALERT_CHANNELS=${ALERT_CHANNELS:-未配置}"
-    if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ] && [ "$INSTALL_RESOURCE_MONITOR" = no ]; then
+    if [ "$INSTALL_FAIL2BAN" = no ] && [ "$INSTALL_AUDITD" = no ] && [ "$INSTALL_WAZUH" = none ] && [ "$INSTALL_DAILY" = no ] && [ "$INSTALL_RESOURCE_MONITOR" = no ] && [ "$INSTALL_TIMEZONE" = no ]; then
       die "--auto 模式未指定任何组件, 示例: INSTALL_FAIL2BAN=yes INSTALL_AUDITD=yes INSTALL_DAILY=yes bash $0 --auto"
     fi
   fi
@@ -1593,6 +1707,7 @@ main() {
   [ "$INSTALL_WAZUH" != none ] && setup_wazuh
   [ "$INSTALL_DAILY" = yes ] && setup_daily_report
   [ "$INSTALL_RESOURCE_MONITOR" = yes ] && setup_resource_monitor
+  [ "$INSTALL_TIMEZONE" = yes ] && setup_timezone
   test_alerts
   summary
 }

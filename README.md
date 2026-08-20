@@ -15,6 +15,7 @@ Linux 服务器自动化安全巡检部署工具：**Fail2ban（暴力破解防�
 | **Wazuh**（可选） | Agent 模式：上报到已有 manager；全套模式：本机部署 manager+indexer+dashboard（官方 all-in-one），告警自动转发到聊天渠道 |
 | **每日巡检日报** | 每天 08:00 推送：当日登录成功/失败、账户变更、当前封禁 IP、系统负载 |
 | **资源监控**（可选） | CPU/内存/磁盘/负载 超阈值实时告警（systemd 周期采集，两级阈值 warn/critical，冷却去重防刷屏）|
+| **时区修改**（可选） | 一键将系统时区设为 上海 / 北京 / 巴基斯坦 / 印度尼西亚首都(雅加达)；首次修改自动备份原时区，卸载时可还原 |
 | **多渠道告警** | 钉钉（支持加签）/ 企业微信 / Telegram / 邮件，可多选；统一告警脚本 `/usr/local/bin/security-alert.sh` |
 
 ## 环境要求
@@ -47,11 +48,12 @@ bash install_security_monitor.sh
 
 1. **组件**（可多选，回车默认 `1,2,5,6`）：
    - `1` Fail2ban · `2` auditd · `3` Wazuh Agent · `4` Wazuh 全套 · `5` 每日日报 · `6` 资源监控
+   - `7` 时区修改：按提示选择 上海 / 北京 / 巴基斯坦 / 印度尼西亚首都(雅加达)
    - 输入 `all` 安装 1,2,5,6（不含 Wazuh）
 2. Wazuh 参数（选了 Wazuh 才问）：agent 需填 manager 地址；全套会**在线检测最新版本**（如 4.14.7），回车用最新，也可指定旧版
 3. **告警渠道**（可多选，直接回车=不配置即仅写本地日志不推送，`0` 同效）：1 钉钉 · 2 企业微信 · 3 Telegram · 4 邮件
 4. 各渠道的 Webhook/Token/邮箱等参数
-5. Fail2ban / auditd 阈值参数
+5. Fail2ban / auditd 阈值参数（选了 `7` 时还会询问要设置的时区）
 6. 确认清单 → 开始安装
 
 安装结束会**发送一条测试告警**验证链路，并打印常用命令与文件清单。
@@ -70,6 +72,14 @@ bash install_security_monitor.sh --auto
 INSTALL_WAZUH=agent WAZUH_MANAGER_ADDR='10.0.0.5' \
 ALERT_CHANNELS=telegram TG_BOT_TOKEN='xxx' TG_CHAT_ID='123456' \
 bash install_security_monitor.sh --auto
+
+# 例3: 仅修改时区为巴基斯坦 (UTC+5)
+INSTALL_TIMEZONE=yes TIMEZONE=Asia/Karachi \
+bash install_security_monitor.sh --auto
+
+# 例4: 时区联动安全巡检一起设 (北京时区)
+INSTALL_FAIL2BAN=yes INSTALL_DAILY=yes INSTALL_TIMEZONE=yes TIMEZONE=Asia/Shanghai \
+bash install_security_monitor.sh --auto
 ```
 
 > 自动模式默认**全部组件关闭**，未指定任何组件会报错退出（防误装）。
@@ -82,6 +92,8 @@ bash install_security_monitor.sh --auto
 | `INSTALL_AUDITD` | no | yes 安装 auditd |
 | `INSTALL_WAZUH` | none | `agent` / `full` |
 | `INSTALL_DAILY` | no | yes 配置每日日报 |
+| `INSTALL_TIMEZONE` | no | yes 修改系统时区 |
+| `TIMEZONE` | 中文交互选择 | 时区名，支持 `Asia/Shanghai`(上海/北京)、`Asia/Karachi`(巴基斯坦)、`Asia/Jakarta`(印尼首都雅加达)、或任何 `/usr/share/zoneinfo/` 下存在的时区（如 `Asia/Tokyo`） |
 | `ALERT_CHANNELS` | 空 | 逗号分隔：`dingtalk,wechat,telegram,email` |
 | `DINGTALK_WEBHOOK` / `DINGTALK_SECRET` | 空 | 钉钉机器人地址 / 加签密钥（可选） |
 | `WECHAT_WEBHOOK` | 空 | 企业微信机器人地址 |
@@ -104,6 +116,25 @@ bash install_security_monitor.sh --auto
 | `RES_INTERVAL` | 300 | 检查间隔（秒）|
 | `RES_COOLDOWN` | 1800 | 同一指标重复告警冷却（秒，防刷屏）|
 | `RES_DISK_IGNORE` | 空 | 忽略的挂载点（逗号分隔，如 `/snap,/mnt/backup`）|
+
+## 时区修改说明
+
+选中 `7 时区修改`（或自动模式 `INSTALL_TIMEZONE=yes`）后，脚本会把系统时区设为所选地区：
+
+| 选项 | 具体时区 | UTC 偏移 | 说明 |
+|------|----------|----------|------|
+| 上海 | `Asia/Shanghai` | UTC+8 | 中国标准时间（北京时间属于同一时区） |
+| 北京 | `Asia/Shanghai` | UTC+8 | 与上海同为东八区，IANA 无独立 `Asia/Beijing`，统一使用 `Asia/Shanghai` |
+| 巴基斯坦 | `Asia/Karachi` | UTC+5 | 巴基斯坦标准时间（卡拉奇） |
+| 印度尼西亚（首都） | `Asia/Jakarta` | UTC+7 | 印尼首都雅加达（WIB 西区） |
+
+行为说明：
+
+- **北京与上海是同一时区**（均为 `Asia/Shanghai`，UTC+8），IANA 时区库里北京没有独立条目，故两者都映射到 `Asia/Shanghai`。
+- 脚本通过 `timedatectl set-timezone`（无 systemd 时直接软链接 `/etc/localtime`）设置，并同步更新 `/etc/timezone`。
+- 首次修改会**自动备份原时区**到 `/etc/security-monitor-tz.orig`，卸载（选项 7）时自动还原回安装前的时区。
+- 若已安装每日日报，脚本会给 `/etc/cron.d/security-monitor` 追加 `TZ=` 行，确保每天 08:00 的日报按新时区执行。
+- 时区独立于其他组件，可仅修改时区而不装任何安全组件。
 
 ## 告警渠道获取方法
 
@@ -308,6 +339,7 @@ Dashboard 各模块几秒~1分钟内应出现对应条目。若 Security events 
 | `/var/ossec/integrations/custom-security` | Wazuh→聊天渠道告警转发（仅全套模式） |
 | `/usr/local/bin/resource-monitor.sh` | 资源监控脚本（CPU/内存/磁盘/负载 阈值告警，仅 `INSTALL_RESOURCE_MONITOR=yes`）|
 | `/etc/systemd/system/resource-monitor.service` | 资源监控 systemd 单元（`--loop` 周期采集）|
+| `/etc/security-monitor-tz.orig` | 修改时区前备份的原时区（仅 `INSTALL_TIMEZONE=yes` 时生成，卸载时还原）|
 | `/var/log/security-alert.log` | 告警发送历史 |
 
 ## 常用命令
@@ -578,6 +610,8 @@ bash install_security_monitor.sh --uninstall   # 或 --remove / -u
 | 想监控 nginx/apache/ftp | 在 `/etc/fail2ban/jail.local` 添加对应监狱（如 `[nginx-http-auth] enabled = true`） |
 | 443 端口被占用 | 自动改 8443；或 `WAZUH_DASHBOARD_PORT=xxxx bash install_security_monitor.sh` |
 | 资源告警收不到 | `resource-monitor.sh --check` 看是否真超阈值；`--test` 测渠道；检查 `RES_DISK_IGNORE` 是否把目标盘忽略了，或阈值设得太高 |
+| 时区改完没生效/想看当前时区 | `date` 查看当前时间；`timedatectl` 查看时区；改完需确认 `/etc/localtime` 软链接指向 `/usr/share/zoneinfo/<时区>` |
+| 想还原原时区 | 重跑卸载并勾选 `7 时区`（会从 `/etc/security-monitor-tz.orig` 还原），或手动 `timedatectl set-timezone <原时区>` |
 | 多台服务器共用一个 Telegram bot/群会冲突吗 | 不冲突（脚本只发送、不接收，不会“抢 bot”）。但多机并发高频告警可能触发 429 限流，脚本会按 `retry_after` 自动重试最多 3 次；钉钉/企微/Telegram 失败会显示真实 `errcode`/`error_code` 而非误报“已发送” |
 | 告警分不清是哪台服务器发的 | 所有告警标题由 `security-alert.sh` 自动加 `[主机名]` 前缀（如 `[web01] 💾 磁盘告警`），多机共用渠道也能一眼区分来源 |
 
