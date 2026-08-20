@@ -209,7 +209,27 @@ interactive_config() {
     die "未选择任何组件, 退出安装"
   fi
 
-  # ---------- 2. Wazuh 参数 ----------
+  # ---------- 2. 时区设置 (紧随组件选择) ----------
+  if [ "$INSTALL_TIMEZONE" = yes ]; then
+    echo ""
+    echo -e "${C_CYAN}--- 时区设置 ---${C_OFF}"
+    echo -e "  请选择要设置的时区:"
+    echo -e "    1 ) 上海 (Asia/Shanghai, UTC+8)"
+    echo -e "    2 ) 北京 (Asia/Shanghai, UTC+8)"
+    echo -e "    3 ) 巴基斯坦 (Asia/Karachi, UTC+5)"
+    echo -e "    4 ) 印度尼西亚首都·雅加达 (Asia/Jakarta, UTC+7)"
+    if ! read -r tzsel; then echo ""; die "输入已中断 (EOF), 安装取消"; fi
+    case "${tzsel:-1}" in
+      1|shanghai|Shanghai|Asia/Shanghai) TIMEZONE="Asia/Shanghai" ;;
+      2|beijing|Beijing|北京|Asia/Beijing) TIMEZONE="Asia/Shanghai" ;;
+      3|pakistan|Pakistan|巴基斯坦|Asia/Karachi) TIMEZONE="Asia/Karachi" ;;
+      4|indonesia|Indonesia|印度尼西亚|雅加达|jakarta|Jakarta|Asia/Jakarta) TIMEZONE="Asia/Jakarta" ;;
+      *) warn "未知时区选项 \"$tzsel\" (${tzsel:-空}), 使用默认上海"; TIMEZONE="Asia/Shanghai" ;;
+    esac
+    log "将设置系统时区为: ${TIMEZONE}"
+  fi
+
+  # ---------- 3. Wazuh 参数 ----------
   if [ "$INSTALL_WAZUH" = "agent" ]; then
     prompt WAZUH_MANAGER_ADDR "Wazuh manager 服务器地址 (IP或域名)" "${WAZUH_MANAGER_ADDR:-}"
     [ -n "$WAZUH_MANAGER_ADDR" ] || die "agent 模式必须提供 manager 地址"
@@ -232,7 +252,7 @@ interactive_config() {
     fi
   fi
 
-  # ---------- 3. 选择告警渠道 ----------
+  # ---------- 4. 选择告警渠道 ----------
   choose "请选择告警推送渠道 (可多选, 不配置则仅写本地日志不推送):" CH_SEL "yes" "" "不配置(仅本地日志)" \
     "1|钉钉机器人" \
     "2|企业微信机器人" \
@@ -256,7 +276,7 @@ interactive_config() {
   esac
   ALERT_CHANNELS="$channels"
 
-  # ---------- 4. 各渠道参数 ----------
+  # ---------- 5. 各渠道参数 ----------
   if echo "$ALERT_CHANNELS" | grep -q dingtalk; then
     echo ""
     echo -e "${C_CYAN}--- 钉钉机器人配置 ---${C_OFF}"
@@ -289,7 +309,7 @@ interactive_config() {
     prompt SMTP_FROM "发件人地址" "${SMTP_FROM:-$SMTP_USER}"
   fi
 
-  # ---------- 5. Fail2ban / auditd 参数 ----------
+  # ---------- 6. Fail2ban / auditd 参数 ----------
   if [ "$INSTALL_FAIL2BAN" = yes ]; then
     echo ""
     echo -e "${C_CYAN}--- Fail2ban 参数 (直接回车用默认) ---${C_OFF}"
@@ -301,25 +321,6 @@ interactive_config() {
   fi
   if [ "$INSTALL_AUDITD" = yes ]; then
     prompt AUDIT_EXECVE "是否审计全部命令执行 (yes/no, 日志量大)" "$AUDIT_EXECVE"
-  fi
-  # ---------- 5.5 时区设置 ----------
-  if [ "$INSTALL_TIMEZONE" = yes ]; then
-    echo ""
-    echo -e "${C_CYAN}--- 时区设置 ---${C_OFF}"
-    echo -e "  请选择要设置的时区:"
-    echo -e "    1 ) 上海 (Asia/Shanghai, UTC+8)"
-    echo -e "    2 ) 北京 (Asia/Shanghai, UTC+8)"
-    echo -e "    3 ) 巴基斯坦 (Asia/Karachi, UTC+5)"
-    echo -e "    4 ) 印度尼西亚首都·雅加达 (Asia/Jakarta, UTC+7)"
-    if ! read -r tzsel; then echo ""; die "输入已中断 (EOF), 安装取消"; fi
-    case "${tzsel:-1}" in
-      1|shanghai|Shanghai|Asia/Shanghai) TIMEZONE="Asia/Shanghai" ;;
-      2|beijing|北京|Asia/Beijing)           TIMEZONE="Asia/Shanghai" ;;
-      3|pakistan|巴基斯坦|Asia/Karachi)       TIMEZONE="Asia/Karachi" ;;
-      4|indonesia|jakarta|印度尼西亚|雅加达|Asia/Jakarta) TIMEZONE="Asia/Jakarta" ;;
-      *) warn "未知时区选项 \"$tzsel\" (${tzsel:-空}), 使用默认上海"; TIMEZONE="Asia/Shanghai" ;;
-    esac
-    log "将设置系统时区为: ${TIMEZONE}"
   fi
 
   if [ "$INSTALL_RESOURCE_MONITOR" = yes ]; then
@@ -336,7 +337,7 @@ interactive_config() {
     prompt RES_DISK_IGNORE "忽略挂载点(逗号分隔, 留空)" "${RES_DISK_IGNORE:-}"
   fi
 
-  # ---------- 6. 确认 ----------
+  # ---------- 7. 确认 ----------
   echo ""
   echo -e "${C_YELLOW}=============== 安装清单确认 ===============${C_OFF}"
   local comps=""
