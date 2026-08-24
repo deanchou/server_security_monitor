@@ -13,7 +13,7 @@ Linux 服务器自动化安全巡检部署工具：**Fail2ban（暴力破解防�
 | **Fail2ban** | SSH 暴力破解自动封禁（次数/窗口/时长/白名单可配），封禁与解封实时推送告警 |
 | **auditd** | 登录/账户变更/关键文件（passwd、shadow、ssh 配置、cron、.ssh 等）/危险命令（反弹 shell、管道 curl\|bash、base64 解码等）审计，实时监控可疑事件 |
 | **Wazuh**（可选） | Agent 模式：上报到已有 manager；全套模式：本机部署 manager+indexer+dashboard（官方 all-in-one），告警自动转发到聊天渠道 |
-| **每日巡检日报** | 每天 08:00 推送：当日登录成功/失败、账户变更、当前封禁 IP、系统负载 |
+| **每日巡检日报** | 每天 00:00 推送：**昨日**登录成功/失败、账户变更、当前封禁 IP、系统负载与内存/磁盘（封禁与负载为实时快照，登录/账户数据取上一完整自然日，避免 0点当天刚开始无数据导致空报）|
 | **资源监控**（可选） | CPU/内存/磁盘/负载 超阈值实时告警（systemd 周期采集，两级阈值 warn/critical，冷却去重防刷屏）|
 | **时区修改**（可选） | 一键将系统时区设为 上海 / 北京 / 巴基斯坦 / 印度尼西亚首都(雅加达)；首次修改自动备份原时区，卸载时可还原 |
 | **多渠道告警** | 钉钉（支持加签）/ 企业微信 / Telegram / 邮件，可多选；统一告警脚本 `/usr/local/bin/security-alert.sh` |
@@ -133,7 +133,7 @@ bash install_security_monitor.sh --auto
 - **北京与上海是同一时区**（均为 `Asia/Shanghai`，UTC+8），IANA 时区库里北京没有独立条目，故两者都映射到 `Asia/Shanghai`。
 - 脚本通过 `timedatectl set-timezone`（无 systemd 时直接软链接 `/etc/localtime`）设置，并同步更新 `/etc/timezone`。
 - 首次修改会**自动备份原时区**到 `/etc/security-monitor-tz.orig`，卸载（选项 7）时自动还原回安装前的时区。
-- 若已安装每日日报，脚本会给 `/etc/cron.d/security-monitor` 追加 `TZ=` 行，确保每天 08:00 的日报按新时区执行。
+- 若已安装每日日报，脚本会给 `/etc/cron.d/security-monitor` 追加 `TZ=` 行，确保每天 00:00 的日报按新时区执行。
 - 时区独立于其他组件，可仅修改时区而不装任何安全组件。
 
 ## 告警渠道获取方法
@@ -335,7 +335,7 @@ Dashboard 各模块几秒~1分钟内应出现对应条目。若 Security events 
 | `/etc/fail2ban/action.d/security-alert.conf` | Fail2ban 告警动作定义 |
 | `/etc/audit/rules.d/security.rules` | 审计规则（关键文件 + 命令审计） |
 | `/etc/systemd/system/audit-alert-watcher.service` | 监控器 systemd 单元 |
-| `/etc/cron.d/security-monitor` | 每日 08:00 日报 cron |
+| `/etc/cron.d/security-monitor` | 每日 00:00 日报 cron |
 | `/etc/logrotate.d/security-alert` | 告警日志轮转（保留 30 天） |
 | `/var/ossec/integrations/custom-security` | Wazuh→聊天渠道告警转发（仅全套模式） |
 | `/usr/local/bin/resource-monitor.sh` | 资源监控脚本（CPU/内存/磁盘/负载 阈值告警，仅 `INSTALL_RESOURCE_MONITOR=yes`）|

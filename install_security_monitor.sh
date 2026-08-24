@@ -13,7 +13,7 @@
 #    [2] auditd        - 登录/账户/命令审计 + 可疑事件实时告警
 #    [3] Wazuh Agent   - 上报到已有的 Wazuh manager
 #    [4] Wazuh 全套    - 本机部署 manager+indexer+dashboard (需 >=4G 内存)
-#    [5] 每日巡检日报   - 每天 08:00 推送安全摘要
+#    [5] 每日巡检日报   - 每天 00:00 推送安全摘要
 #    [6] 资源监控      - CPU/内存/磁盘/负载 超阈值实时告警
 #    [7] 时区修改      - 设置系统时区 (上海/北京/巴基斯坦/印尼首都雅加达)
 #
@@ -182,7 +182,7 @@ interactive_config() {
     "2|auditd       - 登录/账户/命令审计+实时告警 (推荐)" \
     "3|Wazuh Agent  - 上报到已有的 Wazuh manager" \
     "4|Wazuh 全套   - 本机整套部署 (需 >=4G 内存)" \
-    "5|每日巡检日报  - 每天08:00推送安全摘要" \
+    "5|每日巡检日报  - 每天00:00推送安全摘要" \
     "6|资源监控     - CPU/内存/磁盘/负载 超阈值实时告警" \
     "7|时区修改     - 设置系统时区 (上海/北京/巴基斯坦/印尼首都)" \
     "all|推荐全套(Fail2ban+auditd+每日日报+资源监控+时区, 不含 Wazuh)"
@@ -1362,33 +1362,136 @@ SVCEOF
 }
 # ============================ 每日巡检日报 ==================================
 setup_daily_report() {
-  log "配置每日安全巡检日报 (每天 08:00 推送)"
+  log "配置每日安全巡检日报 (每天 00:00 推送)"
 
   cat > /usr/local/bin/security-daily-summary.sh <<'SUMEOF'
 #!/usr/bin/env bash
 # 每日安全巡检摘要 (由 install_security_monitor.sh 生成)
+#
+# 设计说明: 日报在每日 00:00 由 cron 触发, 报告的是 "上一完整自然日"
+# (昨日 00:00 ~ 今日 00:00, 即刚刚结束的那一天) 的数据. 原因: 00:00 当天
+# 刚开始, 用 -ts today 查询只能看到几秒钟的数据. 改为查询昨日完整一天,
+# 才能看到前一天的登录 / 失败 / 账户变更记录. 封禁状态与系统负载为实时快照.
 set -u
 # cron 默认 PATH 仅 /usr/bin:/bin, 而 aureport/ausearch 在 /usr/sbin
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CONF=/etc/security-monitor.conf
 [ -f "$CONF" ] && . "$CONF"
+
 TMP=$(mktemp)
+# 报告窗口: 昨日 00:00 ~ 今日 00:00 (上一完整自然日)
+START=yesterday
+END=today
+# 兼容 GNU date (-d) 与 BSD date (-v); 服务器一般为 GNU
+if date -d 'yesterday' '+%F' >/dev/null 2>&1; then
+  COVER_FROM=$(date -d 'yesterday 00:00:00' '+%F %T')
+  COVER_TO=$(date -d 'today 00:00:00' '+%F %T')
+else
+  COVER_FROM=$(date -v-1d '+%F 00:00:00')
+  COVER_TO=$(date '+%F 00:00:00')
+fi
+
+# 安全取值: 命令缺失时输出回退文案, 避免 subshell 退出码被 set -u 放大
+section_login() {
+  if ! command -v aureport >/dev/null 2>&1; then
+    echo "aureport 不可用 (auditd 未安装或未运行)"; return
+  fi
+  out=$(aureport -l -i -ts "$START" -te "$END" 2>/dev/null)
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" | tail -25
+  else
+    echo "无登录记录"
+  fi
+}
+section_login_fail_count() {
+  if ! command -v aureport >/dev/null 2>&1; then echo "不可用"; return; fi
+  n=$(aureport -l -i --failed -ts "$START" -te "$END" 2>/dev/null | grep -cE '^[0-9]+\.')
+  echo "${n:-0}"
+}
+section_acct_change() {
+  if ! command -v ausearch >/dev/null 2>&1; then
+    echo "aureport 不可用 (auditd 未安装或未运行)"; return
+  fi
+  out=$(ausearch -ts "$START" -te "$END" \
+    -m ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID,USER_CHAUTHTOK \
+    2>/dev/null)
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" | tail -20
+  else
+    echo "无账户变更"
+  fi
+}
+section_fail2ban() {
+  if ! command -v fail2ban-client >/dev/null 2>&1; then
+    echo "- fail2ban 未安装"; return
+  fi
+  if ! fail2ban-client status sshd >/dev/null 2>&1; then
+    echo "- fail2ban 未运行或未配置 sshd 监狱"; return
+  fi
+  out=$(fail2ban-client status sshd 2>/dev/null)
+  curfail=$(printf '%s\n' "$out" | sed -n 's/.*Currently failed:[[:space:]]*//p' | tr -d ' ')
+  totfail=$(printf '%s\n' "$out" | sed -n 's/.*Total failed:[[:space:]]*//p' | tr -d ' ')
+  banned=$(printf '%s\n' "$out" | sed -n 's/.*Currently banned:[[:space:]]*//p' | tr -d ' ')
+  total=$(printf '%s\n' "$out" | sed -n 's/.*Total banned:[[:space:]]*//p' | tr -d ' ')
+  # Banned IP list: 字段后的 IP 可能在同行 (新 fail2ban) 也可能在后续缩进行 (旧 fail2ban).
+  # 用 awk 同时兼容两种格式, 并避免 BSD sed 对 { n; p } 语法的报错.
+  ips=$(printf '%s\n' "$out" | awk '
+    /Banned IP list:/ {
+      sub(/.*Banned IP list:[[:space:]]*/, "")
+      if ($0 != "") print
+      flag = 1; next
+    }
+    flag && /^[[:space:]]/ { sub(/^[[:space:]]+/, ""); print; next }
+    flag && !/^[[:space:]]/ { flag = 0 }
+  ')
+  echo "- 当前封禁 IP 数: ${banned:-0}  (累计封禁: ${total:-0})"
+  echo "- 失败次数: 当前 ${curfail:-0} / 累计 ${totfail:-0}"
+  if [ -n "$ips" ]; then
+    echo "- 封禁 IP 列表:"
+    printf '%s\n' "$ips" | tr ' ' '\n' | grep -v '^$' | sed 's/^/  • /'
+  else
+    echo "- 封禁 IP 列表: 无"
+  fi
+}
+section_load() {
+  if ! command -v uptime >/dev/null 2>&1; then echo "uptime 不可用"; return; fi
+  raw=$(uptime)
+  # GNU/BSD uptime 末尾均为: load average: x.xx, x.xx, x.xx
+  loads=$(printf '%s\n' "$raw" | sed -E 's/^.*load average[: ]*//; s/,$//')
+  load1=$(printf '%s\n' "$loads" | cut -d, -f1 | tr -d ' ')
+  load5=$(printf '%s\n' "$loads" | cut -d, -f2 | tr -d ' ')
+  load15=$(printf '%s\n' "$loads" | cut -d, -f3 | tr -d ' ')
+  # 运行时长: 截取 "up ..." 到 ", N users," 之间
+  dur=$(printf '%s\n' "$raw" | sed -E 's/^.* up //; s/, +[0-9]+ users?,.*//')
+  ncpu=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "?")
+  echo "- 运行时长: ${dur:-未知}"
+  echo "- CPU 核心数: ${ncpu}"
+  echo "- 系统负载 (1/5/15 分钟): ${load1:-?}, ${load5:-?}, ${load15:-?}"
+  if command -v free >/dev/null 2>&1; then
+    free -h 2>/dev/null | awk '/^Mem:/ {printf "- 内存使用: %s / %s (可用 %s)\n", $3, $2, $7}'
+  fi
+  df -h / 2>/dev/null | awk 'NR==2 {printf "- 根分区使用: %s / %s (%s)\n", $3, $2, $5}'
+}
+
 {
-  echo "## 📋 每日安全巡检报告 $(date '+%F %T')"
+  echo "## 🟢 每日安全巡检报告 $(date '+%F %T')"
   echo ""
-  echo "### 1. 今日登录记录 (aureport, 最近25条)"
-  aureport -l -i -ts today 2>/dev/null | tail -25 || echo "无记录"
+  echo "> 数据时段: ${COVER_FROM} ~ ${COVER_TO} (上一完整自然日)  ｜  封禁 / 负载 为实时快照"
   echo ""
-  echo "### 2. 今日登录失败次数: $(aureport -l -i --failed -ts today 2>/dev/null | grep -cE '^[0-9]+\.' )"
+  echo "### 1. 昨日登录记录 (aureport, 最近 25 条)"
+  section_login
   echo ""
-  echo "### 3. 今日账户变更"
-  ausearch -ts today -m ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID,USER_CHAUTHTOK 2>/dev/null | tail -20 || echo "无记录"
+  echo "### 2. 昨日登录失败次数"
+  section_login_fail_count
   echo ""
-  echo "### 4. 当前被 fail2ban 封禁的 IP"
-  fail2ban-client status sshd 2>/dev/null | sed -n '/Banned IP list/,+1p' || echo "无封禁"
+  echo "### 3. 昨日账户变更"
+  section_acct_change
   echo ""
-  echo "### 5. 系统负载"
-  uptime
+  echo "### 4. 当前 fail2ban 封禁状态 (实时)"
+  section_fail2ban
+  echo ""
+  echo "### 5. 系统负载与资源 (实时)"
+  section_load
 } > "$TMP"
 /usr/local/bin/security-alert.sh "每日安全巡检报告 $(date '+%F')" - < "$TMP"
 rm -f "$TMP"
@@ -1399,8 +1502,8 @@ SUMEOF
 SHELL=/bin/bash
 # cron 默认 PATH 不含 /usr/sbin, 必须显式设置, 否则 aureport/ausearch 找不到
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-# 每日 08:00 推送安全巡检日报
-0 8 * * * root /usr/local/bin/security-daily-summary.sh >/dev/null 2>&1
+# 每日 00:00 推送安全巡检日报 (午夜, 覆盖刚结束的上一自然日)
+0 0 * * * root /usr/local/bin/security-daily-summary.sh >/dev/null 2>&1
 CRONEOF
   chmod 644 /etc/cron.d/security-monitor
 
@@ -1467,7 +1570,7 @@ setup_timezone() {
   now=$(date '+%Z %z %F %T')
   log "时区已设置为 ${tz}, 当前系统时间: ${now}"
 
-  # 让每日 08:00 日报按新时区执行 (cron 使用系统时区默认即可, 但显式声明更稳;
+  # 让每日 00:00 日报按新时区执行 (cron 使用系统时区默认即可, 但显式声明更稳;
   # 仅当日报 cron 存在且尚未写 TZ 时追加一行)
   if [ -f /etc/cron.d/security-monitor ] && ! grep -qE '^TZ=' /etc/cron.d/security-monitor; then
     sed -i "/^PATH=/a\\TZ=${tz}" /etc/cron.d/security-monitor
