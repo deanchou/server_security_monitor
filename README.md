@@ -52,7 +52,7 @@ bash install_security_monitor.sh
    - 输入 `all` 安装 1,2,5,6（不含 Wazuh）
 2. Wazuh 参数（选了 Wazuh 才问）：agent 需填 manager 地址；全套会**在线检测最新版本**（如 4.14.7），回车用最新，也可指定旧版
 3. **告警渠道**（可多选，直接回车=不配置即仅写本地日志不推送，`0` 同效）：1 钉钉 · 2 企业微信 · 3 Telegram · 4 邮件
-4. 各渠道的 Webhook/Token/邮箱等参数
+4. 各渠道的 Webhook/Token/邮箱等参数（重装/升级时会自动读取已有 `/etc/security-monitor.conf` 作为默认值并回显，直接回车即保留原值；密钥类只显示前缀）
 5. Fail2ban / auditd 阈值参数（选了 `7` 时还会询问要设置的时区）
 6. 确认清单 → 开始安装
 

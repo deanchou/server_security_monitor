@@ -276,6 +276,33 @@ interactive_config() {
   esac
   ALERT_CHANNELS="$channels"
 
+  # 优先读取已有配置 (重装/升级场景): /etc/security-monitor.conf 中已存在的
+  # 渠道参数回填为提示默认值, 直接回车即保留原值.
+  # 优先级: 环境变量 > 旧配置 > 空. 仅回填当前为空的变量.
+  local _conf=/etc/security-monitor.conf
+  if [ -f "$_conf" ]; then
+    local _saved _line _k _v _cur
+    _saved=$( . "$_conf" 2>/dev/null; \
+      for _k in DINGTALK_WEBHOOK DINGTALK_SECRET WECHAT_WEBHOOK TG_BOT_TOKEN \
+                TG_CHAT_ID EMAIL_TO SMTP_SERVER SMTP_USER SMTP_PASS SMTP_FROM; do \
+      printf '%s=%s\n' "$_k" "${!_k:-}"; done ) || true
+    if printf '%s\n' "$_saved" | grep -qE '^[A-Z_]+=.+'; then
+      echo ""
+      log "检测到已有配置 ${_conf}, 以下参数直接回车即保留原值:"
+      while IFS= read -r _line; do
+        _k=${_line%%=*}; _v=${_line#*=}
+        [ -n "$_v" ] || continue
+        eval "_cur=\${$_k:-}"
+        [ -n "$_cur" ] && continue
+        printf -v "$_k" '%s' "$_v"
+        case "$_k" in
+          DINGTALK_SECRET|SMTP_PASS) echo "  ${_k} = ${_v:0:6}...(已设置, 回车保留)" ;;
+          *) echo "  ${_k} = ${_v}" ;;
+        esac
+      done <<< "$_saved"
+    fi
+  fi
+
   # ---------- 5. 各渠道参数 ----------
   if echo "$ALERT_CHANNELS" | grep -q dingtalk; then
     echo ""
