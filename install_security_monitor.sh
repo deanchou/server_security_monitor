@@ -1392,34 +1392,71 @@ else
 fi
 
 # 安全取值: 命令缺失时输出回退文案, 避免 subshell 退出码被 set -u 放大
+# 登录记录与实时提醒 (audit-alert-watcher) 完全同源: 都取 audit.log 的
+# USER_LOGIN 记录, 日报与提醒永远一致, 不依赖额外包 (last/lastb 需要
+# sysvinit-utils, 最小化镜像常缺). 字段提取沿用 watcher 的 getf 逻辑.
+getf()  { printf '%s\n' "$1" | tr -d '"' | tr "'" ' ' | sed -n "s/.*$2=\([^ ]*\).*/\1/p" | head -1; }
 section_login() {
-  if ! command -v aureport >/dev/null 2>&1; then
-    echo "aureport 不可用 (auditd 未安装或未运行)"; return
+  if ! command -v ausearch >/dev/null 2>&1; then
+    echo "- ausearch 不可用 (auditd 未安装)"; return
   fi
-  out=$(aureport -l -i -ts "$START" -te "$END" 2>/dev/null)
-  if [ -n "$out" ]; then
-    printf '%s\n' "$out" | tail -25
-  else
-    echo "无登录记录"
-  fi
+  local out recs
+  out=$(ausearch -m USER_LOGIN -ts "$START" -te "$END" 2>/dev/null)
+  recs=$(printf '%s\n' "$out" | grep '^type=USER_LOGIN' || true)
+  if [ -z "$recs" ]; then echo "- 无登录记录"; return; fi
+  printf '%s\n' "$recs" | while IFS= read -r l; do
+    # 与 audit-alert-watcher 相同的回退链: acct -> UID -> auid
+    user=$(getf "$l" acct); [ -n "$user" ] || user=$(getf "$l" UID); [ -n "$user" ] || user=$(getf "$l" auid)
+    case "$user" in ''|*[!0-9]*) ;; *)
+      u2=$(getent passwd "$user" 2>/dev/null | cut -d: -f1); [ -n "$u2" ] && user=$u2 ;; esac
+    addr=$(getf "$l" addr);       [ -n "$addr" ] || addr=?
+    tty=$(getf "$l" terminal);    [ -n "$tty" ] || tty=?
+    res=$(getf "$l" res)
+    ts=$(printf '%s\n' "$l" | sed -n 's/.*audit(\([0-9]*\).*/\1/p')
+    when=""; [ -n "$ts" ] && when=$(date -d "@$ts" '+%m-%d %H:%M' 2>/dev/null)
+    [ "$res" = "success" ] && st="登录" || st="登录失败"
+    echo "- ${when:-时间未知}  ${user:-?} 从 ${addr} ${st} (${tty})"
+  done | tail -25
 }
-section_login_fail_count() {
-  if ! command -v aureport >/dev/null 2>&1; then echo "不可用"; return; fi
-  n=$(aureport -l -i --failed -ts "$START" -te "$END" 2>/dev/null | grep -cE '^[0-9]+\.')
-  echo "${n:-0}"
+section_login_fail() {
+  if ! command -v ausearch >/dev/null 2>&1; then
+    echo "- ausearch 不可用 (auditd 未安装)"; return
+  fi
+  local out n
+  out=$(ausearch -m USER_LOGIN -ts "$START" -te "$END" 2>/dev/null)
+  n=$(printf '%s\n' "$out" | grep '^type=USER_LOGIN' | grep -c 'res=failed')
+  echo "- 失败 ${n:-0} 次"
 }
 section_acct_change() {
   if ! command -v ausearch >/dev/null 2>&1; then
-    echo "aureport 不可用 (auditd 未安装或未运行)"; return
+    echo "- ausearch 不可用 (auditd 未安装)"; return
   fi
+  local out recs
   out=$(ausearch -ts "$START" -te "$END" \
     -m ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID,USER_CHAUTHTOK \
     2>/dev/null)
-  if [ -n "$out" ]; then
-    printf '%s\n' "$out" | tail -20
-  else
-    echo "无账户变更"
-  fi
+  recs=$(printf '%s\n' "$out" | grep '^type=' || true)
+  if [ -z "$recs" ]; then echo "- 无账户变更"; return; fi
+  # 不用 -i: 它会把时间戳转成人类可读格式, 导致 epoch 提取失败; 改用 date -d @epoch 转换
+  printf '%s\n' "$recs" | while IFS= read -r l; do
+    t=${l#type=}; t=${t%% *}
+    case "$t" in
+      ADD_USER)       tcn="新增用户" ;;
+      DEL_USER)       tcn="删除用户" ;;
+      ADD_GROUP)      tcn="新增组"   ;;
+      DEL_GROUP)      tcn="删除组"   ;;
+      USER_CHAUTHTOK) tcn="修改密码" ;;
+      CHUSER_ID)      tcn="修改用户" ;;
+      CHGRP_ID)       tcn="修改组"   ;;
+      *)              tcn="$t"       ;;
+    esac
+    acct=$(printf '%s\n' "$l" | sed -n 's/.*acct="\([^"]*\)".*/\1/p')
+    [ -z "$acct" ] && acct=$(printf '%s\n' "$l" | sed -n 's/.*acct=\([^ ]*\).*/\1/p')
+    ts=$(printf '%s\n' "$l" | sed -n 's/.*audit(\([0-9]*\).*/\1/p')
+    when=""
+    [ -n "$ts" ] && when=$(date -d "@$ts" '+%F %T' 2>/dev/null)
+    echo "- ${when:-时间未知}  ${tcn}  账户: ${acct:-未知}"
+  done
 }
 section_fail2ban() {
   if ! command -v fail2ban-client >/dev/null 2>&1; then
@@ -1448,7 +1485,7 @@ section_fail2ban() {
   echo "- 失败次数: 当前 ${curfail:-0} / 累计 ${totfail:-0}"
   if [ -n "$ips" ]; then
     echo "- 封禁 IP 列表:"
-    printf '%s\n' "$ips" | tr ' ' '\n' | grep -v '^$' | sed 's/^/  • /'
+    printf '%s\n' "$ips" | tr ' ' '\n' | grep -v '^$' | sed 's/^/- /'
   else
     echo "- 封禁 IP 列表: 无"
   fi
@@ -1474,15 +1511,13 @@ section_load() {
 }
 
 {
-  echo "## 🟢 每日安全巡检报告 $(date '+%F %T')"
+  echo "数据时段: ${COVER_FROM} ~ ${COVER_TO} (上一完整自然日); 封禁/负载为实时快照"
   echo ""
-  echo "> 数据时段: ${COVER_FROM} ~ ${COVER_TO} (上一完整自然日)  ｜  封禁 / 负载 为实时快照"
-  echo ""
-  echo "### 1. 昨日登录记录 (aureport, 最近 25 条)"
+  echo "### 1. 昨日登录记录 (最近 25 条)"
   section_login
   echo ""
   echo "### 2. 昨日登录失败次数"
-  section_login_fail_count
+  section_login_fail
   echo ""
   echo "### 3. 昨日账户变更"
   section_acct_change
@@ -1493,7 +1528,8 @@ section_load() {
   echo "### 5. 系统负载与资源 (实时)"
   section_load
 } > "$TMP"
-/usr/local/bin/security-alert.sh "每日安全巡检报告 $(date '+%F')" - < "$TMP"
+# 注意第三个参数 "info": 不传会默认 high -> 标题图标变 🔴, 与正文/日报性质不符
+/usr/local/bin/security-alert.sh "每日安全巡检报告 $(date '+%F')" - "info" < "$TMP"
 rm -f "$TMP"
 SUMEOF
   chmod 755 /usr/local/bin/security-daily-summary.sh
