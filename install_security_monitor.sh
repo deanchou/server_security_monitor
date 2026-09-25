@@ -1406,17 +1406,37 @@ CONF=/etc/security-monitor.conf
 [ -f "$CONF" ] && . "$CONF"
 
 TMP=$(mktemp)
-# 报告窗口: 昨日 00:00 ~ 今日 00:00 (上一完整自然日)
-START=yesterday
-END=today
+# 报告窗口: 昨日 00:00 ~ 今日 00:00 (上一完整自然日, 本地时区)
+#
+# 根因记录 (2026-09 实测定位): ausearch 的 -ts/--start 相对时间关键字
+# (yesterday/today) 在这台服务器上按 UTC 解析, 而 date 按本地时区(UTC+8).
+# 日报在本地 00:00:01 触发时 = UTC 前一日 16:00, ausearch 窗口整体错位 8h,
+# 导致窗口内的登录记录查不到、报告恒空; 而 ausearch 显式日期 (mm/dd/YYYY)
+# 又被其解析器拒绝 ("Error parsing start date"). 两条路都不可靠.
+# 结论: 不用 ausearch 的时间过滤, 全量取记录后在脚本内按 epoch 过滤,
+# 时间语义完全由 GNU date 的本地时区控制, 确定性可控.
 # 兼容 GNU date (-d) 与 BSD date (-v); 服务器一般为 GNU
 if date -d 'yesterday' '+%F' >/dev/null 2>&1; then
   COVER_FROM=$(date -d 'yesterday 00:00:00' '+%F %T')
   COVER_TO=$(date -d 'today 00:00:00' '+%F %T')
+  WIN_START=$(date -d 'yesterday 00:00:00' '+%s')
+  WIN_END=$(date -d 'today 00:00:00' '+%s')
 else
   COVER_FROM=$(date -v-1d '+%F 00:00:00')
   COVER_TO=$(date '+%F 00:00:00')
+  WIN_START=$(date -v-1d -v0H -v0M -v0S '+%s')
+  WIN_END=$(date -v0H -v0M -v0S '+%s')
 fi
+
+# epoch 窗口过滤器: stdin 逐行读 audit 记录, 只输出时间落在
+# [WIN_START, WIN_END) 内的行 (时间取自 msg=audit(123456789.123:456) 整数部分)
+filter_window() {
+  awk -v s="$WIN_START" -v e="$WIN_END" '
+    { if (match($0, /audit\([0-9]+/)) {
+        ts = substr($0, RSTART+6, RLENGTH-6) + 0
+        if (ts >= s && ts < e) print
+      } }'
+}
 
 # 安全取值: 命令缺失时输出回退文案, 避免 subshell 退出码被 set -u 放大
 # 登录记录与实时提醒 (audit-alert-watcher) 完全同源: 都取 audit.log 的
@@ -1427,11 +1447,26 @@ section_login() {
   if ! command -v ausearch >/dev/null 2>&1; then
     echo "- ausearch 不可用 (auditd 未安装)"; return
   fi
-  local out recs
-  out=$(ausearch -m USER_LOGIN -ts "$START" -te "$END" 2>/dev/null)
+  local out recs win note=""
+  out=$(ausearch -m USER_LOGIN 2>&1)
   recs=$(printf '%s\n' "$out" | grep '^type=USER_LOGIN' || true)
-  if [ -z "$recs" ]; then echo "- 无登录记录"; return; fi
-  printf '%s\n' "$recs" | while IFS= read -r l; do
+  if [ -z "$recs" ]; then
+    if printf '%s\n' "$out" | grep -qiE 'usage|invalid|error'; then
+      # 查询本身出错: 把错误暴露在报告里, 不再静默空白
+      echo "- ausearch 查询异常: $(printf '%s\n' "$out" | head -1)"
+    else
+      echo "- 无登录记录"
+    fi
+    return
+  fi
+  # 窗口内最多 25 条; 空窗口时降级显示最近 3 条 (带日期), 有记录必可见
+  win=$(printf '%s\n' "$recs" | filter_window | tail -25)
+  if [ -z "$win" ]; then
+    note="- 昨日无登录, 以下为最近登录记录:"
+    win=$(printf '%s\n' "$recs" | tail -3)
+  fi
+  [ -n "$note" ] && printf '%s\n' "$note"
+  printf '%s\n' "$win" | while IFS= read -r l; do
     # 与 audit-alert-watcher 相同的回退链: acct -> UID -> auid
     user=$(getf "$l" acct); [ -n "$user" ] || user=$(getf "$l" UID); [ -n "$user" ] || user=$(getf "$l" auid)
     case "$user" in ''|*[!0-9]*) ;; *)
@@ -1450,8 +1485,8 @@ section_login_fail() {
     echo "- ausearch 不可用 (auditd 未安装)"; return
   fi
   local out n
-  out=$(ausearch -m USER_LOGIN -ts "$START" -te "$END" 2>/dev/null)
-  n=$(printf '%s\n' "$out" | grep '^type=USER_LOGIN' | grep -c 'res=failed')
+  out=$(ausearch -m USER_LOGIN 2>/dev/null)
+  n=$(printf '%s\n' "$out" | grep '^type=USER_LOGIN' | filter_window | grep -c 'res=failed')
   echo "- 失败 ${n:-0} 次"
 }
 section_acct_change() {
@@ -1459,10 +1494,9 @@ section_acct_change() {
     echo "- ausearch 不可用 (auditd 未安装)"; return
   fi
   local out recs
-  out=$(ausearch -ts "$START" -te "$END" \
-    -m ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID,USER_CHAUTHTOK \
+  out=$(ausearch -m ADD_USER,DEL_USER,ADD_GROUP,DEL_GROUP,CHUSER_ID,CHGRP_ID,USER_CHAUTHTOK \
     2>/dev/null)
-  recs=$(printf '%s\n' "$out" | grep '^type=' || true)
+  recs=$(printf '%s\n' "$out" | grep '^type=' | filter_window || true)
   if [ -z "$recs" ]; then echo "- 无账户变更"; return; fi
   # 不用 -i: 它会把时间戳转成人类可读格式, 导致 epoch 提取失败; 改用 date -d @epoch 转换
   printf '%s\n' "$recs" | while IFS= read -r l; do
